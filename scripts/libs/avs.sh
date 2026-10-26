@@ -345,6 +345,21 @@ endif()'
 '#include <unistd.h>
 #define _lseeki64 lseek'
 
+  # 7) 和 uavs3d 一模一样的上游事故：inc/com_thread.h 第 26 行，
+  #    那条 MSVC 的 #pragma comment 又写在 **非 Windows 分支** 里（#else 之后）：
+  #      #else
+  #      #pragma comment(lib, "pthreadVC2.lib")   <-- 这里
+  #      #include <semaphore.h>
+  #      #include <pthread.h>
+  #    后果同 uavs3d：GNU ld 当垃圾段忽略，NDK 的 lld 会解析，于是任何链接
+  #    libuavs3e.a 的命令都报
+  #      ld: error: libuavs3e.a(uavs3e.c.o): unable to find library from
+  #               dependent library specifier: pthreadVC2.lib
+  #    （run#18 android-arm64：uavs3d 修好之后，紧接着就轮到它）
+  edit_exact "$dir/inc/com_thread.h" \
+    '#pragma comment(lib, "pthreadVC2.lib")' \
+    '/* 上游把 Windows 的 #pragma comment(lib) 错写进了非 Windows 分支；lld 会当真，删掉 */'
+
   log "cmake build uavs3e (8bit)"
   # 位深显式锁 8bit，不是偷懒，是因为「10bit 编码」这条路现在走不通：
   #   - uavs3e 的开关是顶层 CMakeLists 里的 add_definitions(-DCOMPILE_10BIT=1)，

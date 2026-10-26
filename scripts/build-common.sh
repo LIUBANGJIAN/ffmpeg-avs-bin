@@ -27,6 +27,10 @@ build_everything() {
   #      configure 会报一句没头没脑的 "xxx not found using pkg-config"，
   #      而且还要等 30 分钟才看到。挪到这里，3 分钟内就能定位。
   fix_android_pc_files
+  # 先扫 MSVC 残留的「依赖库指令」，再自测链接：
+  # 这类残留在 linux 上完全无害，只有 NDK 的 lld 会当真，
+  # 而 configure 只会吐一句 "xxx not found using pkg-config"。
+  scan_avs_deplib
   probe_avs_pc_links || warn "AVS 库链接自测未全部通过，FFmpeg configure 大概率会失败（原因见上）"
 
   # 3) 视频

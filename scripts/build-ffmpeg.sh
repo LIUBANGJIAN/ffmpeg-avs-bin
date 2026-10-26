@@ -80,6 +80,42 @@ probe_avs_pc_links() {
   return "$rc"
 }
 
+# 扫 AVS 四个静态库里有没有 MSVC 的「依赖库指令」残留。
+#
+# 背景（run#17 / run#18 各踩一次，uavs3d 和 uavs3e 各一处）：
+#   两者都把 `#pragma comment(lib, "pthreadVC2.lib")` 写在了 **非 Windows 分支**
+#   （#else 之后），是上游的 copy-paste 事故。clang 会把这句编成目标文件里一个
+#   叫 .linker-options 的段；段名本身就是字符串常量，所以直接 grep 归档文件
+#   就能发现，不需要 objdump。
+#   - GNU ld（linux / mingw）不认识这个段，当垃圾忽略 → 一路无事，所以从来没
+#     在 linux/windows 上暴露过
+#   - **NDK 的 lld 会照做**，于是任何链接该库的命令都报
+#       ld: error: libuavs3d.a(uavs3d.c.o): unable to find library from
+#                dependent library specifier: pthreadVC2.lib
+#   - 而 FFmpeg configure 把这堆东西折叠成一句
+#       ERROR: uavs3d >= 1.1.41 not found using pkg-config
+#   一个 pthreadVC2 字样都看不到，排查成本极高。所以这里提前拦一道。
+#
+# 注意 probe_pc_link 抓不到这个坑（它今天两次都报了通过），别指望它。
+scan_avs_deplib() {
+  local lib f bad=0
+  for lib in davs2 xavs2 uavs3d uavs3e; do
+    f="$PREFIX/lib/lib$lib.a"
+    [ -f "$f" ] || continue
+    if grep -aq 'linker-options' "$f"; then
+      warn "$(basename "$f") 里含 .linker-options 段：上游把 MSVC 的 #pragma comment(lib,…) 写进了非 Windows 分支"
+      bad=1
+    fi
+  done
+  if [ "$bad" = "1" ]; then
+    warn "修法：在对应源码里删掉那行 #pragma comment（见 scripts/libs/avs.sh 里 uavs3d/uavs3e 两处 edit_exact）"
+    if [ "${TARGET_OS:-}" = "android" ]; then
+      die "lld 会按 .linker-options 去 -l pthreadVC2.lib，android 上必定链接失败，先修源码再来"
+    fi
+  fi
+  return 0
+}
+
 # 只在该 .pc 存在时才追加 --enable-xxx
 #
 # 注意：这里**必须恒返回 0**。平台脚本都带 `set -euo pipefail`，
