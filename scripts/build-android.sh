@@ -108,6 +108,22 @@ source "$ROOT/scripts/build-common.sh"
 # lib.sh 定义了 PREFIX，现在才能设 pkg-config 搜索路径
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig"
 
+# 交叉编译时**所有**依赖都装在我们自己的前缀里，没有任何一个在 toolchain 的
+# 默认搜索路径中。带 .pc 的库（davs2/xavs2/uavs3d/uavs3e/x264/...）会把
+# -L$PREFIX/lib 一起带出来，所以它们没事；但**没有 .pc 的库**（最典型是
+# libmp3lame，lame 3.100 根本不装 .pc）走的是 FFmpeg configure 里的
+#   check_lib libmp3lame lame/lame.h lame_set_VBR_quality -lmp3lame -lm
+# 这条路径只用 configure 的全局 cflags/ldflags，于是链接行是
+#   clang ... -o test test.o -lmp3lame -lm -lc++_static -lc++abi
+# 一个 -L 都没有 →  ld: error: unable to find library -lmp3lame
+#     →  ERROR: libmp3lame >= 3.98.3 not found   （run#16 android-arm64）
+# 头文件能编过是因为 -I 早被前面几次 pkg-config 检测攒进 cflags 了，
+# 所以只有链接这一半会炸，现象很误导。
+# 注意 --extra-ldflags 是加进 $ldflags 的，configure 的测试链接和最终链接
+# 都会带上，两边都需要它。
+export EXTRA_LDFLAGS="-L$PREFIX/lib"
+export EXTRA_CFLAGS="-I$PREFIX/include"
+
 # meson 没有 --host 那套，跨平台必须给 cross file
 export MESON_CROSS_FILE="$WORK/meson-${PKG_ABI_NAME}.ini"
 cat > "$MESON_CROSS_FILE" <<EOF

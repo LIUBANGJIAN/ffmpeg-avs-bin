@@ -57,6 +57,15 @@ source "$ROOT/scripts/libs/misc.sh"
 source "$ROOT/scripts/build-ffmpeg.sh"
 source "$ROOT/scripts/build-common.sh"
 
+# 所有依赖都自建在 $PREFIX 下，不在 MSYS2 的默认搜索路径里。
+# 带 .pc 的库会自己带出 -L$PREFIX/lib，但**没有 .pc 的库**（lame 3.100 就是一个，
+# 我们是在 audio.sh 里给它补了个 lame.pc，可 FFmpeg 对 libmp3lame 走的是
+# 裸 check_lib 而不是 pkg-config）只有全局 ldflags 里的 -L 可依赖，
+# 否则报 cannot find -lmp3lame → `ERROR: libmp3lame >= 3.98.3 not found`。
+# android-arm64 上已经实测踩到（run#16），windows 同理先堵住。
+# 必须放在 source lib.sh 之后：PREFIX 定义在那里，提前引用会触发 set -u。
+export EXTRA_LDFLAGS="-L$PREFIX/lib"
+
 # ---------------- 干活 ----------------
 build_everything
 smoke_test
