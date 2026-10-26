@@ -134,13 +134,38 @@ build_libvpx() {
     --enable-vp9-highbitdepth
     --enable-pic
   )
-  # Android 的 libvpx 构建脚本靠 --sdk-path 自己找 clang，不吃 CC 环境变量
+  # Android：libvpx 1.15 已经不认 --sdk-path（那是 1.9~1.11 的老写法，
+  # 现在传会直接 "Unknown option"）。它对 android 目标的策略变成了
+  # 「standalone NDK toolchain」：build/make/configure.sh 里写着
+  #   android*) echo "Assuming standalone build with NDK toolchain."
+  # 也就是完全信任外部传进来的工具链 —— build-android.sh 已经导出了
+  # CC/CXX/AR/RANLIB/STRIP/NM，但**没有 AS 和 LD**，这两个必须在这里补：
+  #
+  #   AS：arm 汇编（vpx_dsp/arm/*.asm → ads2gas.pl → .S）是用 $(AS) 编的
+  #       （build/make/Makefile: `$(AS) $(ASFLAGS) -o $@ $<`）。
+  #       configure 里 AS 默认是 ${CROSS}as，CROSS 为空 ⇒ 宿主的 x86_64 GNU as，
+  #       它不认识 AArch64 指令。指成 clang 之后，configure.sh 的 android 分支
+  #       会命中 `case "$AS" in *clang) add_asflags -c`（不加 -c 会去链接）。
+  #   LD：默认 LD=${CROSS}${link_with_cc} ⇒ 宿主 gcc，拿它链 AArch64 目标文件
+  #       会失败，而 configure 的 check_lib/check_header 全是「失败就静默降级」，
+  #       结果就是编出来一个偷偷关掉全部汇编的 libvpx —— 不报错，但慢一半。
+  local _lvp_as_old="" _lvp_ld_old=""
   if [ "${TARGET_OS:-}" = "android" ]; then
     [ -n "${ANDROID_NDK_HOME:-}" ] || die "libvpx(android): 缺少 ANDROID_NDK_HOME"
-    args+=("--sdk-path=$ANDROID_NDK_HOME")
+    [ -n "${CC:-}" ] || die "libvpx(android): CC 未导出，无法推导 AS/LD"
+    _lvp_as_old="${AS:-}"
+    _lvp_ld_old="${LD:-}"
+    export AS="$CC"
+    export LD="$CC"
   fi
 
   custom_configure "$dir" libvpx configure "${args[@]}"
+
+  # 恢复环境，别把 android 的 AS/LD 泄漏给后面的库
+  if [ "${TARGET_OS:-}" = "android" ]; then
+    if [ -n "$_lvp_as_old" ]; then export AS="$_lvp_as_old"; else unset AS; fi
+    if [ -n "$_lvp_ld_old" ]; then export LD="$_lvp_ld_old"; else unset LD; fi
+  fi
   require_pc vpx
 }
 

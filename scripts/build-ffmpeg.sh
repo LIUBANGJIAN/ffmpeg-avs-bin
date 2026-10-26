@@ -11,15 +11,26 @@
 #      不检查的话产物看着正常，实际少一半能力。
 # ==============================================================================
 
+# 该 .pc 是否存在（供需要判断返回值的调用点使用）
+_have_pc() {
+  pkg-config --exists "$1" 2>/dev/null
+}
+
 # 只在该 .pc 存在时才追加 --enable-xxx
+#
+# 注意：这里**必须恒返回 0**。平台脚本都带 `set -euo pipefail`，
+# 若在「找不到库」的分支 return 1，第一个缺库的点就会把整个脚本杀掉 ——
+# 症状是只打出一条「跳过 --enable-libsvtav1」然后 exit 1，
+# 后面的参数组装、configure 一个字都看不到（run#7 的 linux 就是这么挂的）。
+# 需要判断成败的调用点请用 _have_pc，别依赖本函数的返回值。
 _enable_if_pc() {
   local pc="$1" flag="$2"
-  if pkg-config --exists "$pc" 2>/dev/null; then
+  if _have_pc "$pc"; then
     FF_ARGS+=("$flag")
     return 0
   fi
   warn "跳过 $flag（pkg-config 找不到 $pc）"
-  return 1
+  return 0
 }
 
 # 断言某个 CONFIG_xxx 在 configure 产出里为 1
@@ -99,8 +110,14 @@ build_ffmpeg() {
     # 硬件编码只装头文件，无运行库依赖；没装到就自动跳过。
     # 注意不要写 --enable-ffnvcodec：那不是文档化的开关，
     # nvenc 的依赖里已经含 ffnvcodec，会自动带上。
-    _enable_if_pc ffnvcodec --enable-nvenc && FF_ARGS+=(--enable-nvdec)
-    _enable_if_pc libvpl    --enable-libvpl
+    # 注意不能写 `_enable_if_pc ... && FF_ARGS+=(...)`：_enable_if_pc 现在恒返回 0，
+    # 那样 --enable-nvdec 会被无条件加上。用 _have_pc 显式判断。
+    if _have_pc ffnvcodec; then
+      FF_ARGS+=(--enable-nvenc --enable-nvdec)
+    else
+      warn "跳过 --enable-nvenc（pkg-config 找不到 ffnvcodec）"
+    fi
+    _enable_if_pc libvpl --enable-libvpl
     # AMF 没有 .pc，只能看头文件
     if [ -d "$PREFIX/include/AMF" ]; then
       FF_ARGS+=(--enable-amf)
@@ -131,6 +148,8 @@ build_ffmpeg() {
   local logf="$LOGS/ffmpeg-configure.log"
   CURRENT_LOGFILE="$logf"
 
+  # 把最终参数串打出来：configure 失败时这是第一手证据
+  log "FF_ARGS(${#FF_ARGS[@]} 项): ${FF_ARGS[*]}"
   log "configure FFmpeg ${FFMPEG_VERSION} (${TARGET_OS}/${TARGET_ARCH})"
   (
     cd "$FF_DIR"
