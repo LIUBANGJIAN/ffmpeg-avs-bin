@@ -29,6 +29,17 @@ build_davs2() {
     'elif [[ "$bit_depth" = "9" || "$bit_depth" = "10" ]]; then' \
     'elif [[ "$bit_depth" = "9" ]]; then'
 
+  # 10bit 的 SIMD 例程里用了未限定的 min/max，而文件只 include 了 intrinsics
+  # 头、没有 <algorithm>。MSVC 下靠 windows.h 带的 min/max 宏能过，MinGW 的
+  # GCC 直接报 "'min' was not declared in this scope; did you mean 'sin'?"。
+  # 换成三元表达式：不依赖头文件，也不受命名空间影响。
+  edit_exact "$dir/source/common/vec/intrinsic_intra-pred.cc" \
+    '    int ishift = min(ishift_x, ishift_y);' \
+    '    int ishift = (ishift_x < ishift_y) ? ishift_x : ishift_y;'
+  edit_exact "$dir/source/common/vec/intrinsic_pixel_avx.cc" \
+    '    start = max(start, 0);' \
+    '    start = (start > 0) ? start : 0;' 4
+
   local arch_opts=()
   case "${TARGET_ARCH:-x86_64}" in
     arm*|aarch64)

@@ -21,7 +21,18 @@ build_zlib() {
   dep_needed zlib || return 0
   local dir; dir="$(fetch zlib)"
 
-  custom_configure "$dir" zlib configure "--prefix=$PREFIX"
+  # --static 必须加。Linux 那条线为了 musl 全静态产物给 LDFLAGS 塞了 -static，
+  # 而 zlib 默认同时产出 libz.so，ld 在 -static 下建共享库会直接报
+  #   relocation R_X86_64_32 against hidden symbol `__TMC_END__'
+  #   can not be used when making a shared object
+  # 我们只需要 libz.a，所以只建静态库，从根上避开这个组合。
+  custom_configure "$dir" zlib configure "--prefix=$PREFIX" --static
+
+  # zlib 的 .pc 依赖安装方式，缺了就自己补一个，
+  # 否则 FFmpeg 的 --enable-zlib 会静默失效（configure 不报错，能力直接没有）。
+  if ! pkg-config --exists zlib 2>/dev/null; then
+    gen_pc zlib 1.3.1 "zlib compression library" "-lz"
+  fi
   require_pc zlib
 }
 
