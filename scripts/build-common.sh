@@ -21,6 +21,13 @@ build_everything() {
   # 2) AVS 四件套（本项目核心，尽早暴露问题）
   build_avs_all
 
+  # 2.5) AVS 四件套刚装完就做一次「pkg-config + 真编真链」自测。
+  #      为什么要提前：这一步等价于 FFmpeg configure 里的 require_pkg_config，
+  #      而它排在第 6 步（所有依赖之后）。若某个库静态链接缺符号，
+  #      configure 会报一句没头没脑的 "xxx not found using pkg-config"，
+  #      而且还要等 30 分钟才看到。挪到这里，3 分钟内就能定位。
+  probe_avs_pc_links || warn "AVS 库链接自测未全部通过，FFmpeg configure 大概率会失败（原因见上）"
+
   # 3) 视频
   build_video_all
 

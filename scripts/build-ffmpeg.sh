@@ -65,6 +65,21 @@ probe_pc_link() {
   return 0
 }
 
+# 四个 AVS 库的「pkg-config + 真编真链」自测，供 build_everything 在
+# AVS 阶段刚结束时就调用 —— 早 30 分钟发现缺符号，比 configure 末尾那句
+# 误导性的 "not found using pkg-config" 有用得多。
+probe_avs_pc_links() {
+  local rc=0
+  mkdir -p "$BLD"
+  # `|| true` 是必须的：平台脚本带 set -e，探测失败正是我们想看见的，
+  # 不该在这里就把脚本杀掉（那样连 dump_log 都来不及打）
+  _have_pc davs2  && { probe_pc_link davs2  "1.6.0"  davs2.h             davs2_decoder_open || rc=1; }
+  _have_pc xavs2  && { probe_pc_link xavs2  "1.3.0"  "stdint.h xavs2.h"  xavs2_api_get      || rc=1; }
+  _have_pc uavs3d && { probe_pc_link uavs3d "1.1.41" uavs3d.h            uavs3d_decode      || rc=1; }
+  _have_pc uavs3e && { probe_pc_link uavs3e ""       "uavs3e/uavs3e.h"   uavs3e_enc         || rc=1; }
+  return "$rc"
+}
+
 # 只在该 .pc 存在时才追加 --enable-xxx
 #
 # 注意：这里**必须恒返回 0**。平台脚本都带 `set -euo pipefail`，
@@ -202,13 +217,9 @@ build_ffmpeg() {
 
   # configure 之前先自测四个 AVS 库 —— 它们的 require_pkg_config 报错信息
   # 等于没有信息，与其等 configure 抛一句 not found，不如现在就把真实原因喊出来
-  mkdir -p "$BLD"
-  # 只探已经在 pkg-config 里的库；`|| true` 是必须的 —— 平台脚本带 set -e，
-  # 探测失败（这正是我们想看见的）不该把脚本直接杀掉，后面 dump_log 才有意义
-  _have_pc davs2  && { probe_pc_link davs2  "1.6.0"  davs2.h             davs2_decoder_open || true; }
-  _have_pc xavs2  && { probe_pc_link xavs2  "1.3.0"  "stdint.h xavs2.h"  xavs2_api_get      || true; }
-  _have_pc uavs3d && { probe_pc_link uavs3d "1.1.41" uavs3d.h            uavs3d_decode      || true; }
-  _have_pc uavs3e && { probe_pc_link uavs3e ""       "uavs3e/uavs3e.h"   uavs3e_enc         || true; }
+  # 兜底再测一次（正常情况下 build_everything 在 AVS 阶段已经测过了；
+  # 这里保留是因为单独跑 build_ffmpeg 时也要有防护）
+  probe_avs_pc_links || true
 
   log "configure FFmpeg ${FFMPEG_VERSION} (${TARGET_OS}/${TARGET_ARCH})"
   (
