@@ -53,6 +53,17 @@ build_x265() {
     arm*|aarch64) asm_opt=(-DENABLE_ASSEMBLY=OFF) ;;
   esac
 
+  # CMake 4.4 上 x265 3.4 configure 直接失败（Linux/cmake 3.29 却是好的），
+  # 根因是 source/common/CMakeLists.txt 这两行：
+  #     set_source_files_properties(version.cpp PROPERTIES COMPILE_FLAGS ${VERSION_FLAGS})
+  # VERSION_FLAGS 是个**没加引号的**字符串，里面用空格拼了两段
+  # （-DX265_VERSION=… 和 -DENABLE_ASSEMBLY=1），展开后变成 3 个实参，
+  # 而 PROPERTIES 后面要求「属性/值」成对 → 老 CMake 容忍奇数尾巴，4.x 直接报错。
+  # 加一对引号就是修好，行为不变（本来就是要拼成一整串编译参数）。
+  edit_exact "$dir/source/common/CMakeLists.txt" \
+    'set_source_files_properties(version.cpp PROPERTIES COMPILE_FLAGS ${VERSION_FLAGS})' \
+    'set_source_files_properties(version.cpp PROPERTIES COMPILE_FLAGS "${VERSION_FLAGS}")'
+
   cmake_build "$dir/source" x265 \
     -DENABLE_SHARED=OFF \
     -DENABLE_CLI=OFF \

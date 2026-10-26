@@ -195,6 +195,11 @@ endif()'
 '#define ENABLE_FUNCTION_C 1'
 
   log "cmake build uavs3d (10bit)"
+  # 只编库目标：test/uavs3dec 会 target_link_libraries(… pthread)，
+  # 而 Android 的 bionic 把 pthread 并进了 libc，没有独立 -lpthread，
+  # 链接期直接 "ld: error: unable to find library -lpthread"。
+  # 我们只要 libuavs3d.a，命令行程序一次也用不到。
+  local CMAKE_BUILD_TARGET=uavs3d
   cmake_build "$dir" uavs3d \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
@@ -289,6 +294,8 @@ endif()'
   #   - 想真正打开，得同时把 FFmpeg 侧的 patches/libuavs3e.c 改成
   #     bit_depth_internal=10 并做 8→10 的样本搬移，是另一个独立改动。
   # 所以这里显式 OFF：C 库、ARM 汇编、CLI 三者一致都是 8bit。
+  # 同样只编库目标，跳过 uavs3enc 命令行（原因见 build_uavs3d）
+  local CMAKE_BUILD_TARGET=uavs3e
   cmake_build "$dir" uavs3e \
     -DCOMPILE_10BIT=OFF \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \

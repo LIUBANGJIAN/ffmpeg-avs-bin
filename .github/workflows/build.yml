@@ -111,9 +111,13 @@ jobs:
             -e FFMPEG_VERSION="$FFMPEG_VERSION" \
             alpine:3.20 sh -c '
               set -e
+              # diffutils 必须显式装：Alpine 自带的 diff 是 BusyBox 版，
+              # libvpx 的 configure 会用 `diff --version` 探 GNU diff，
+              # BusyBox 直接报 "unrecognized option: version" → Configuration failed。
               apk add --no-cache \
                 bash build-base linux-headers nasm cmake meson ninja pkgconf \
                 perl autoconf automake libtool git curl python3 zip file binutils \
+                diffutils \
                 tar xz
               bash ./scripts/build-linux.sh
             '

@@ -49,6 +49,19 @@ die()  { printf '%s[FATAL] %s%s\n' "$C_RED" "$*" "$C_OFF" >&2; exit 1; }
 dump_log() {
   local f="$1"
   [ -f "$f" ] || return 0
+
+  # 只看「最后 60 行」是不够的：并行 make 会把真正的报错埋掉，
+  # CMake 的 CMake Error 还可能因为 stdout/stderr 缓冲顺序跑到中间去。
+  # 所以先在全文里把关键错误行捞出来，再补一段尾部。
+  if grep -q "CMake Error" "$f" 2>/dev/null; then
+    warn "----- CMake Error 上下文：$f -----"
+    grep -n -A 8 "CMake Error" "$f" | head -n 60 >&2 || true
+  fi
+
+  warn "----- 关键错误行：$f -----"
+  grep -n -E "error:|Error [0-9]+$|undefined reference|ld returned|No such file|cannot find|not found|Configuration failed" "$f" 2>/dev/null \
+    | tail -n 30 >&2 || true
+
   warn "----- 日志尾部：$f -----"
   tail -n 60 "$f" >&2 || true
   warn "----- 日志结束 -----"
@@ -304,8 +317,18 @@ cmake_build() {
         "$@" > "$logf" 2>&1 || { dump_log "$logf"; die "$tag: cmake configure 失败"; }
 
   log "cmake build $tag"
-  cmake --build "$bdir" -j "$JOBS" >> "$logf" 2>&1 \
-    || { dump_log "$logf"; die "$tag: cmake build 失败"; }
+  # CMAKE_BUILD_TARGET：只编指定目标。
+  # 用来跳过那些「我们根本不需要、但在交叉环境里必炸」的命令行程序
+  # （uavs3d/uavs3e 的 test/utest.c 会 target_link_libraries(… pthread)，
+  #  而 bionic 把 pthread 并进了 libc，没有单独的 -lpthread → ld 报
+  #  "unable to find library -lpthread"）。
+  if [ -n "${CMAKE_BUILD_TARGET:-}" ]; then
+    cmake --build "$bdir" --target "$CMAKE_BUILD_TARGET" -j "$JOBS" >> "$logf" 2>&1 \
+      || { dump_log "$logf"; die "$tag: cmake build 失败（target=$CMAKE_BUILD_TARGET）"; }
+  else
+    cmake --build "$bdir" -j "$JOBS" >> "$logf" 2>&1 \
+      || { dump_log "$logf"; die "$tag: cmake build 失败"; }
+  fi
   cmake --install "$bdir" >> "$logf" 2>&1 \
     || { dump_log "$logf"; die "$tag: cmake install 失败"; }
   ok "$tag: 安装完成"
