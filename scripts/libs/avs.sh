@@ -263,7 +263,18 @@ endif()'
 #define COMPILE_10BIT 0
 #endif'
 
-  # 5) test/utest.c 的平台分支有两个坑，一起补：
+  # 5) inc/uavs3e.h 里两处 `#if defined(_WIN32) || defined(__linux__)`：
+  #    第一处 include <sys/timeb.h>，第二处用 struct timeb + ftime() 取毫秒时间。
+  #    Android 的 clang 同样定义 __linux__，于是掉进这个分支，
+  #    而 bionic 根本没有 sys/timeb.h → "fatal error: 'sys/timeb.h' file not found"。
+  #    这两处本来就是「Windows 用 ftime、其它平台用 gettimeofday」的分流，
+  #    把 __linux__ 从条件里去掉，Linux/Android 就走下面 #elif defined(__GNUC__)
+  #    的 gettimeofday 分支（glibc 和 bionic 都支持）。
+  edit_exact "$dir/inc/uavs3e.h" \
+    'defined(_WIN32) || defined(__linux__)' \
+    'defined(_WIN32)' 2
+
+  # 6) test/utest.c 的平台分支有两个坑，一起补：
   #      #if defined(__APPLE__) || defined(__loongarch__)
   #      #include <unistd.h>          <- 只有 Apple/loongarch 包含
   #      #define _lseeki64 lseek

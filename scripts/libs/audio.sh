@@ -23,6 +23,14 @@ build_lame() {
     --disable-frontend \
     --disable-dependency-tracking
 
+  # lame 3.100 **根本不提供 .pc**（上游从 3.98 到现在都没加过）。
+  # v2/openssl 那样「装了但 pkg-config 找不到」会让 FFmpeg 的
+  # --enable-libmp3lame 静默失效，所以这里自己补一个。
+  # -lm 不能省：libmp3lame 用到 math 函数，静态链接时没人替它带。
+  if ! pkg-config --exists lame 2>/dev/null; then
+    gen_pc lame 3.100 "LAME MP3 encoder" "-lmp3lame -lm"
+  fi
+
   require_pc lame
 }
 
