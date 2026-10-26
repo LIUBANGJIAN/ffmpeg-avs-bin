@@ -126,7 +126,12 @@ endian = 'little'
 
 [properties]
 needs_exe_wrapper = true
-sys_root = '$TC/sysroot'
+# 这里**故意不设 sys_root**。设了之后 meson 会把 pkg-config 输出里的绝对
+# include 路径当作「目标机路径」，在前面再拼一次 sys_root，得到
+#   -I/opt/ndk.../sysroot/home/runner/work/.../prefix/include/freetype2
+# 于是 harfbuzz 编到 hb-ft.cc 就 'ft2build.h' file not found（run#9 android）。
+# NDK 的 clang wrapper（aarch64-linux-android21-clang）自带 sysroot，
+# 根本不需要 meson 再补；设了纯属帮倒忙。
 
 # 交叉编译时 meson 会忽略环境里的 CFLAGS，必须在这里显式给，
 # 否则 -fPIC / -D__ANDROID_API__ 全丢，dav1d 这类库会按 host 默认值编。
