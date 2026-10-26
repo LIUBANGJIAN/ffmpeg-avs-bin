@@ -1,5 +1,7 @@
 
 
+#include <string.h>
+
 #include "uavs3e/uavs3e.h" 
 
 #include "mpeg12.h"

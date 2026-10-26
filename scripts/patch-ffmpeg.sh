@@ -78,5 +78,48 @@ extern const FFCodec ff_libuavs3e_encoder;'
   cp -f "$src" "$dir/libavcodec/libuavs3e.c"
   ok "已放入 libavcodec/libuavs3e.c"
 
-  ok "FFmpeg AVS3 编码补丁应用完成（6 处文本替换 + 1 个新文件）"
+  # ---- ⑧ libavcodec/libuavs3d.c：摘掉对 uavs3d 1.2+ 才有的色彩字段的引用 ----
+  #
+  # FFmpeg 6.1 自带的 libuavs3d.c 会读 seqh->colour_description /
+  # colour_primaries / transfer_characteristics / matrix_coefficients，
+  # 而 uavs3d **v1.1** 的 uavs3d_com_seqh_t 里根本没有这四个成员
+  # （parser.c 读出来就直接丢了）。于是 make 阶段报：
+  #   libavcodec/libuavs3d.c:231:25: error: 'struct uavs3d_com_seqh_t'
+  #       has no member named 'colour_description'      （run#18 linux）
+  #
+  # 为什么不去升级 uavs3d 到 1.2：
+  #   1.2 确实有这四个字段，但它的 CMakeLists 改成按 Uavs3d_TARGET_CPU 分支，
+  #   armv7 一支会强行 enable_language(ASM) 并加 `-mfloat-abi=hard`
+  #   （NDK 用的是 softfp），还得编一堆 .S —— 等于把我们已经调通的
+  #   "Android 只走纯 C" 结论整个推翻重来。
+  #
+  # 代价：解码 AVS3 时不再把色彩信息写进 AVCodecContext。
+  # 需要时用 -color_primaries / -color_trc / -colorspace 手动指定即可。
+  # 这段用整块文本锚点（17 行），锚点漂移会立刻失败，不会静默。
+  edit_exact "$dir/libavcodec/libuavs3d.c" \
+'                if (seqh->colour_description) {
+                    if (UAVS3D_CHECK_INVALID_RANGE(seqh->colour_primaries, 0, 9) ||
+                        UAVS3D_CHECK_INVALID_RANGE(seqh->transfer_characteristics, 0, 14) ||
+                        UAVS3D_CHECK_INVALID_RANGE(seqh->matrix_coefficients, 0, 11)) {
+                        av_log(avctx, AV_LOG_ERROR,
+                               "Invalid colour description: primaries: %d"
+                               "transfer characteristics: %d"
+                               "matrix coefficients: %d.\n",
+                               seqh->colour_primaries,
+                               seqh->transfer_characteristics,
+                               seqh->matrix_coefficients);
+                    } else {
+                        avctx->color_primaries = ff_avs3_color_primaries_tab[seqh->colour_primaries];
+                        avctx->color_trc       = ff_avs3_color_transfer_tab [seqh->transfer_characteristics];
+                        avctx->colorspace      = ff_avs3_color_matrix_tab   [seqh->matrix_coefficients];
+                    }
+                }' \
+'                /* 这里原本是一段把 seqh->colour_description / colour_primaries /
+                 * transfer_characteristics / matrix_coefficients 搬到
+                 * AVCodecContext 的代码。我们用 uavs3d v1.1，它的
+                 * uavs3d_com_seqh_t 还没有这四个成员（上游 1.2 才加），
+                 * 所以整块摘掉（原因见 scripts/patch-ffmpeg.sh）。
+                 * 需要时用 -color_primaries / -color_trc / -colorspace 手动指定。 */'
+
+  ok "FFmpeg AVS3 补丁应用完成（configure 4 处 + Makefile 1 处 + allcodecs 1 处 + libuavs3e.c 1 个文件 + libuavs3d.c 1 处）"
 }
