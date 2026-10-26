@@ -85,13 +85,29 @@ package_output() {
   # 许可证与说明必须随产物走 —— GPL 二进制分发的硬要求。
   # 协议全文不自己抄：FFmpeg 源码树里就带着 COPYING.GPLv2 / COPYING.LGPLv2.1，
   # 直接拷过来，保证与上游逐字一致。
+  #
+  # ⚠️ 协议版本必须跟**实际配置**一致，不能凭印象写死。
+  # 我们为了自建 OpenSSL 3.x（Apache-2.0，与 GPLv2 不兼容）开了 --enable-version3，
+  # 产物因此是 **GPLv3 or later**；此时只附 GPLv2 文本是错的。
+  local _v3=0 _a _gpl _lgpl _tag
+  for _a in ${FF_ARGS[@]+"${FF_ARGS[@]}"}; do
+    [ "$_a" = "--enable-version3" ] && _v3=1
+  done
   cp -f "$ROOT/README.md" "$stage/" 2>/dev/null || true
-  if [ -n "${FF_DIR:-}" ] && [ -f "$FF_DIR/COPYING.GPLv2" ]; then
-    cp -f "$FF_DIR/COPYING.GPLv2" "$stage/LICENSE.GPLv2.txt"
-    [ -f "$FF_DIR/COPYING.LGPLv2.1" ] && cp -f "$FF_DIR/COPYING.LGPLv2.1" "$stage/LICENSE.LGPLv2.1.txt"
-    ok "已随包附带 GPLv2 协议全文"
+  if [ "$_v3" = "1" ]; then
+    _gpl="COPYING.GPLv3"; _lgpl="COPYING.LGPLv3"; _tag="GPLv3（--enable-version3）"
   else
-    warn "没找到 FFmpeg 源码里的 COPYING.GPLv2 —— 分发包会缺协议全文，发布前必须补上"
+    _gpl="COPYING.GPLv2"; _lgpl="COPYING.LGPLv2.1"; _tag="GPLv2"
+  fi
+  if [ -n "${FF_DIR:-}" ] && [ -f "$FF_DIR/$_gpl" ]; then
+    cp -f "$FF_DIR/$_gpl" "$stage/LICENSE.${_gpl#COPYING.}.txt"
+    [ -f "$FF_DIR/$_lgpl" ] && cp -f "$FF_DIR/$_lgpl" "$stage/LICENSE.${_lgpl#COPYING.}.txt"
+    # 两版一并发出去也不算错，只是多了个文件；真正要对的是「主协议」那张。
+    cp -f "$FF_DIR/COPYING.GPLv2"   "$stage/LICENSE.GPLv2.txt"   2>/dev/null || true
+    cp -f "$FF_DIR/COPYING.LGPLv2.1" "$stage/LICENSE.LGPLv2.1.txt" 2>/dev/null || true
+    ok "已随包附带 $_tag 协议全文"
+  else
+    warn "没找到 FFmpeg 源码里的 $_gpl —— 分发包会缺协议全文，发布前必须补上"
   fi
 
   local zip="$outdir/$name.zip"
