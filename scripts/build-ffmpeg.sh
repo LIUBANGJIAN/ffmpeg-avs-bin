@@ -16,6 +16,53 @@ _have_pc() {
   pkg-config --exists "$1" 2>/dev/null
 }
 
+# 复刻 FFmpeg require_pkg_config 的完整测试：pkg-config 取 flags + 真编真链。
+#
+# 为什么需要它：FFmpeg 的检测失败只会抛一句
+#   ERROR: davs2 >= 1.6.0 not found using pkg-config
+# 这一句什么信息都没有 —— 可能是 .pc 版本不达标、头文件没装到 Cflags 指的
+# 位置、静态库里缺符号、缺 -lstdc++、甚至 pkg-config 自己报错。真实原因只
+# 写在 ffbuild/config.log 里。这里在 configure 之前用**同样的参数**跑一遍，
+# 失败时把编译器的原始 stderr 直接打进 CI 日志。
+#
+# probe_pc_link <pc 名> <版本约束> <头文件(可空格分隔)> <符号名>
+probe_pc_link() {
+  local pc="$1" ver="$2" hdrs="$3" func="$4"
+  local td="$BLD/probe-$pc"
+  rm -rf "$td"; mkdir -p "$td"
+
+  local cflags libs
+  if ! cflags="$(pkg-config --cflags --static "$pc" 2>"$td/pc.err")"; then
+    warn "probe($pc): pkg-config --cflags --static 失败"
+    sed -n '1,10p' "$td/pc.err" >&2 || true
+    return 1
+  fi
+  if ! libs="$(pkg-config --libs --static "$pc" 2>>"$td/pc.err")"; then
+    warn "probe($pc): pkg-config --libs --static 失败"
+    sed -n '1,10p' "$td/pc.err" >&2 || true
+    return 1
+  fi
+  printf '%s  probe(%s): cflags=[%s] libs=[%s]\n' "$C_CYN" "$pc" "$cflags" "$libs" >&2
+
+  local h
+  : > "$td/t.c"
+  for h in $hdrs; do printf '#include <%s>\n' "$h" >> "$td/t.c"; done
+  # 取地址强制产生符号引用，等价于 FFmpeg 的 check_func_headers
+  printf 'int main(void){ void *p = (void *)&%s; return p == NULL; }\n' "$func" >> "$td/t.c"
+
+  local cc_bin="${CC:-cc}"
+  # 这里就是要词分割，flags 必须拆成多个参数
+  # shellcheck disable=SC2086
+  if ! $cc_bin $cflags "$td/t.c" -o "$td/t" $libs ${EXTRA_LIBS:-} > "$td/cc.log" 2>&1; then
+    warn "probe($pc): 真编真链失败（这就是 configure 里那句 not found 的真实原因）"
+    printf '  cmd: %s %s t.c -o t %s %s\n' "$cc_bin" "$cflags" "$libs" "${EXTRA_LIBS:-}" >&2
+    sed -n '1,30p' "$td/cc.log" >&2 || true
+    return 1
+  fi
+  ok "probe($pc): pkg-config + 真编真链 通过"
+  return 0
+}
+
 # 只在该 .pc 存在时才追加 --enable-xxx
 #
 # 注意：这里**必须恒返回 0**。平台脚本都带 `set -euo pipefail`，
@@ -150,11 +197,34 @@ build_ffmpeg() {
 
   # 把最终参数串打出来：configure 失败时这是第一手证据
   log "FF_ARGS(${#FF_ARGS[@]} 项): ${FF_ARGS[*]}"
+
+  # configure 之前先自测四个 AVS 库 —— 它们的 require_pkg_config 报错信息
+  # 等于没有信息，与其等 configure 抛一句 not found，不如现在就把真实原因喊出来
+  mkdir -p "$BLD"
+  # 只探已经在 pkg-config 里的库；`|| true` 是必须的 —— 平台脚本带 set -e，
+  # 探测失败（这正是我们想看见的）不该把脚本直接杀掉，后面 dump_log 才有意义
+  _have_pc davs2  && { probe_pc_link davs2  "1.6.0"  davs2.h             davs2_decoder_open || true; }
+  _have_pc xavs2  && { probe_pc_link xavs2  "1.3.0"  "stdint.h xavs2.h"  xavs2_api_get      || true; }
+  _have_pc uavs3d && { probe_pc_link uavs3d "1.1.41" uavs3d.h            uavs3d_decode      || true; }
+  _have_pc uavs3e && { probe_pc_link uavs3e ""       "uavs3e/uavs3e.h"   uavs3e_enc         || true; }
+
   log "configure FFmpeg ${FFMPEG_VERSION} (${TARGET_OS}/${TARGET_ARCH})"
   (
     cd "$FF_DIR"
     ./configure "${FF_ARGS[@]}"
-  ) > "$logf" 2>&1 || { dump_log "$logf"; die "FFmpeg configure 失败"; }
+  ) > "$logf" 2>&1 || {
+    # require_pkg_config / check_lib 的真实原因只写在 ffbuild/config.log 最后的段落里，
+    # 而 configure 自己只抛一句 "ERROR: xxx not found using pkg-config"。
+    # 不把这段挖出来，等于每次都只能靠猜。
+    local cfglog="$FF_DIR/ffbuild/config.log"
+    if [ -f "$cfglog" ]; then
+      warn "----- config.log 尾部（失败的那次检测就在这里）-----"
+      tail -n 45 "$cfglog" >&2 || true
+      warn "----- config.log 结束 -----"
+    fi
+    dump_log "$logf"
+    die "FFmpeg configure 失败"
+  }
 
   # ---------------- 防静默失败断言 ----------------
   # 这四项是本项目的存在理由，任何一个没开成，产物就没有意义

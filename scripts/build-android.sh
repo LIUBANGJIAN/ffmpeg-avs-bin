@@ -145,7 +145,7 @@ export CMAKE_TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
 export ANDROID_PLATFORM="android-${ANDROID_API}"
 [ -f "$CMAKE_TOOLCHAIN" ] || { echo "找不到 NDK cmake toolchain：$CMAKE_TOOLCHAIN" >&2; exit 1; }
 
-# libvpx 不吃 CC 环境变量，只认 --sdk-path
+# libvpx 的 configure 需要 NDK 根目录（它自己会去找 sysroot / 工具链规则）
 export ANDROID_NDK_HOME
 
 # ---------------- FFmpeg 专属参数 ----------------
