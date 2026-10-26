@@ -30,7 +30,15 @@ export PKG_CONFIG=pkg-config
 
 # -static 让 exe 不依赖 libgcc_s_seh-1.dll / libwinpthread-1.dll / libstdc++-6.dll，
 # 这才是真正能拷走就用的单文件
-export CFLAGS="-O2 -pipe -fno-ident"
+#
+# 后面四个 -Wno-* 是「老代码 x 新 GCC」的止血带，不是我们代码有问题：
+#   GCC 14 把 -Wimplicit-function-declaration / -Wint-conversion /
+#   -Wincompatible-pointer-types / -Wreturn-mismatch 从警告提升成了默认错误，
+#   而 x264/lame/libvorbis/fontconfig 这些 2015~2018 年的代码大量踩中。
+#   关掉诊断 = 回到 GCC 13 的行为，不改变任何生成代码。
+export CFLAGS="-O2 -pipe -fno-ident \
+  -Wno-incompatible-pointer-types -Wno-implicit-function-declaration \
+  -Wno-int-conversion -Wno-return-mismatch"
 export CXXFLAGS="$CFLAGS"
 export LDFLAGS="-static -static-libgcc -static-libstdc++"
 export EXTRA_CFLAGS="-D__USE_MINGW_ANSI_STDIO=1"
