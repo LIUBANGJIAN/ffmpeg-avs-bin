@@ -141,9 +141,17 @@ smoke_test() {
   ok "AVS3 编码产出 $(du -h "$tmp/t.avs3" | cut -f1)"
 
   log "冒烟测试：解回来验证帧数"
-  local n
-  n="$("$bin" -hide_banner -loglevel error -i "$tmp/t.avs3" -f null - 2>&1 | wc -l)"
-  ok "AVS3 解码无异常（stderr 行数 $n）"
+  # 这里**不能**写成 `"$bin" ... 2>&1 | wc -l`：段错误时管道把一切都吞掉，
+  # 日志里只剩一句 "Process completed with exit code 139"，连是哪个命令挂了
+  # 都看不出来（run#22 linux 就是这样白烧了一轮）。改成落盘 + 显式查退出码。
+  local dlog="$tmp/dec.log" rc=0
+  "$bin" -hide_banner -loglevel error -y -i "$tmp/t.avs3" -f null - >"$dlog" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    warn "AVS3 解码退出码 $rc（139 = SIGSEGV，134 = SIGABRT）—— 解码端输出如下："
+    tail -n 30 "$dlog" >&2 || true
+    die "冒烟失败：AVS3 解码失败"
+  fi
+  ok "AVS3 解码无异常（stderr 行数 $(wc -l < "$dlog")）"
 
   rm -rf "$tmp"
 }

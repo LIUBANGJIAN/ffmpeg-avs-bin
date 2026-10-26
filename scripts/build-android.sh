@@ -131,6 +131,35 @@ export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig"
 export EXTRA_LDFLAGS="-L$PREFIX/lib"
 export EXTRA_CFLAGS="-I$PREFIX/include"
 
+# ---------------- API < 21 的 libc++ locale 垫片 ----------------
+# NDK r25c 里的 libc++_static.a 是**面向 API 21 编的**：它的 locale.o 直接
+# 引用 bionic 直到 21 才提供的那批 locale 函数。于是 armv7（API 19）在
+# FFmpeg configure 的第一次 C++ 链接就炸（run#22）：
+#   ld: error: undefined symbol: mbsnrtowcs
+#   >>> referenced by __bsd_locale_fallbacks.h:67
+#   >>>      locale.o:(__libcpp_mbsnrtowcs_l(...)) in archive libc++_static.a
+#   ... 还有 mbtowc / localeconv / strtoll_l / strtoull_l / strtold_l /
+#       wcstoll / wcstoull / wcstof，一共 9 个
+# 同一份代码 arm64（API 21）一把过，可见与我们自己的代码无关，是「静态
+# C++ 运行库在 API 19 上不可用」这个既定事实。
+# 解法：给这 9 个符号补一份最小实现（scripts/android-api19-compat/），
+# 编成静态库挂到 --extra-libs 的**最后**（必须在 -lc++_static 之后，
+# 否则 locale.o 里的未定义引用还没出现，没人去拉它）。
+if [ "${ANDROID_API:-21}" -lt 21 ]; then
+  API19_COMPAT_DIR="$WORK/api19compat"
+  mkdir -p "$API19_COMPAT_DIR"
+  log "android: API $ANDROID_API < 21，编 libc++ locale 垫片（9 个符号）"
+  # 不再额外传 -D__ANDROID_API__：版本化的 wrapper（…androideabi19-clang）
+  # 已经通过 -target 定义了它，重复定义只会多一条 macro redefined 警告。
+  "$CC" -c -O2 -fPIC -o "$API19_COMPAT_DIR/api19_compat.o" \
+    "$ROOT/scripts/android-api19-compat/api19_compat.c" \
+    || die "API19 兼容垫片编译失败"
+  "$AR" rcs "$API19_COMPAT_DIR/libapi19compat.a" "$API19_COMPAT_DIR/api19_compat.o" \
+    || die "API19 兼容垫片打包失败"
+  export EXTRA_LIBS="$EXTRA_LIBS -L$API19_COMPAT_DIR -lapi19compat"
+  ok "android: 垫片就绪 → $API19_COMPAT_DIR/libapi19compat.a"
+fi
+
 # meson 没有 --host 那套，跨平台必须给 cross file
 export MESON_CROSS_FILE="$WORK/meson-${PKG_ABI_NAME}.ini"
 

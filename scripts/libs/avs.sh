@@ -244,6 +244,41 @@ endif()'
     '#pragma comment(lib, "pthreadVC2.lib")' \
     '/* 上游把 Windows 的 #pragma comment(lib) 错写进了非 Windows 分支；lld 会当真，删掉 */'
 
+  # 线程栈：和 uavs3e 一模一样的坑，只是表现在解码侧。
+  # source/decore/threadpool.c 建线程池时 attr = NULL（用系统默认栈），于是：
+  #   - glibc 默认 8 MiB、Windows 走 win32thread.c 的 _beginthreadex(NULL, 0)
+  #     拿 1 MiB 默认栈 → 都够用；
+  #   - musl 默认只有 128 KiB → AVS3 的 CTU/CU 递归解析在 worker 线程里跑，
+  #     直接撑爆。
+  # run#22 linux 冒烟里表现得很典型：`-c:v libuavs3e` 编码已经成功（24.0K），
+  # 紧接着「解回来验证帧数」那条命令一声不响就 exit 139 —— windows 同一份
+  # 产物跑同一条命令完全正常。这里给 worker 显式 8 MiB 栈。
+  edit_exact "$dir/source/decore/threadpool.c" \
+'    for (i = 0; i < pool->threads; i++) {
+        if (uavs3d_pthread_create(pool->thread_handle + i, NULL, (uavs3d_tfunc_a_t)uavs3d_threadpool_thread, pool)) {
+            goto fail;
+        }
+    }' \
+'    for (i = 0; i < pool->threads; i++) {
+#if defined(_WIN32)
+        if (uavs3d_pthread_create(pool->thread_handle + i, NULL, (uavs3d_tfunc_a_t)uavs3d_threadpool_thread, pool)) {
+            goto fail;
+        }
+#else
+        /* 显式给 8 MiB 栈：musl 的默认线程栈只有 128 KiB，CU 递归解析撑爆它 */
+        {
+            uavs3d_pthread_attr_t attr;
+            uavs3d_pthread_attr_init(&attr);
+            pthread_attr_setstacksize(&attr, (size_t)8 << 20);
+            if (uavs3d_pthread_create(pool->thread_handle + i, &attr, (uavs3d_tfunc_a_t)uavs3d_threadpool_thread, pool)) {
+                uavs3d_pthread_attr_destroy(&attr);
+                goto fail;
+            }
+            uavs3d_pthread_attr_destroy(&attr);
+        }
+#endif
+    }'
+
   log "cmake build uavs3d (10bit)"
   # 只编库目标：test/uavs3dec 会 target_link_libraries(… pthread)，
   # 而 Android 的 bionic 把 pthread 并进了 libc，没有独立 -lpthread，
