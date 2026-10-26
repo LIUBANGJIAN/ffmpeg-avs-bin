@@ -58,6 +58,10 @@ build_openssl() {
 
   local args=(
     "--prefix=$PREFIX"
+    # 必须显式 --libdir=lib。openssl 3.x 在 linux-x86_64 上默认装到
+    # $PREFIX/lib64/pkgconfig，而我们的 PKG_CONFIG_PATH 只含 $PREFIX/lib/pkgconfig，
+    # 结果 openssl 明明编好了却 pkg-config 找不到，--enable-openssl 会被静默关掉。
+    "--libdir=lib"
     "--openssldir=$PREFIX/ssl"
     "$(openssl_target)"
     no-shared no-tests no-async no-ssl3 no-comp

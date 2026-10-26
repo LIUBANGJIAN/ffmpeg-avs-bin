@@ -46,11 +46,18 @@ build_x265() {
   local dir; dir="$(fetch x265)"
 
   # 源码在 source/ 子目录，顶层没有 CMakeLists
+  # ARM 上关汇编：x265 的 ARM 汇编依赖 gas-preprocessor，交叉编译环境里没有，
+  # 开了必然失败。纯 C 慢一些，但能出产物（与 AVS 那几个库的处理保持一致）。
+  local asm_opt=(-DENABLE_ASSEMBLY=ON)
+  case "${TARGET_ARCH:-x86_64}" in
+    arm*|aarch64) asm_opt=(-DENABLE_ASSEMBLY=OFF) ;;
+  esac
+
   cmake_build "$dir/source" x265 \
     -DENABLE_SHARED=OFF \
     -DENABLE_CLI=OFF \
     -DENABLE_PIC=ON \
-    -DENABLE_ASSEMBLY=ON \
+    "${asm_opt[@]}" \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
   require_pc x265

@@ -99,7 +99,11 @@ build_xavs2() {
   log "configure xavs2 (8bit)"
   (
     cd "$bdir"
-    CC="$CXX" \
+    # 注意：这里**不能**像 davs2 那样把 CC 强制成 CXX。
+    # xavs2 是纯 C 项目（source 下 70 个 .c、0 个 .cc）；用 g++ 编 .c 会按 C++
+    # 规则做 narrowing 检查，cpu.c 里的 `static const char cache32_ids[] = {0x82,...}`
+    # 直接报 "narrowing conversion of '130' from 'int' to 'char'"。
+    # CC 由平台脚本导出（gcc / NDK clang），configure 会自己用。
     ./configure \
       --prefix="$PREFIX" \
       ${HOST:+--host="$HOST"} \

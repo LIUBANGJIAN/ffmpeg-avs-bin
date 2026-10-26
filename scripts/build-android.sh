@@ -63,6 +63,18 @@ if [ ! -d "$TC" ]; then
   exit 1
 fi
 
+# openssl 3.x 的 Configurations/15-android.conf 只认 ANDROID_NDK_ROOT / ANDROID_NDK，
+# 而且必须靠 `which clang` 解析出 $ndk/.../prebuilt/.../clang，才会走 NDK clang 分支。
+# GitHub 的 ubuntu runner 预装了别的 NDK 并已设好 ANDROID_NDK_ROOT，不覆盖的话
+# openssl 会去 r25c 里找早已被移除的 arm-linux-androideabi-gcc，报
+#   "no NDK arm-linux-androideabi-gcc on $PATH"
+export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+export ANDROID_NDK="$ANDROID_NDK_HOME"
+case ":$PATH:" in
+  *":$TC/bin:"*) ;;
+  *) export PATH="$TC/bin:$PATH" ;;
+esac
+
 export CC="$TC/bin/${CLANG_TRIPLE}${ANDROID_API}-clang"
 export CXX="$TC/bin/${CLANG_TRIPLE}${ANDROID_API}-clang++"
 export AR="$TC/bin/llvm-ar"
@@ -115,7 +127,23 @@ endian = 'little'
 [properties]
 needs_exe_wrapper = true
 sys_root = '$TC/sysroot'
+
+# 交叉编译时 meson 会忽略环境里的 CFLAGS，必须在这里显式给，
+# 否则 -fPIC / -D__ANDROID_API__ 全丢，dav1d 这类库会按 host 默认值编。
+[built-in options]
+c_args = ['-O2', '-fPIC', '-D__ANDROID_API__=$ANDROID_API']
+c_link_args = ['-D__ANDROID_API__=$ANDROID_API']
+cpp_args = ['-O2', '-fPIC', '-D__ANDROID_API__=$ANDROID_API']
+cpp_link_args = ['-D__ANDROID_API__=$ANDROID_API']
 EOF
+
+# cmake 必须显式给 NDK 的 toolchain 文件。
+# 只传 -DANDROID_ABI 而不给 toolchain 时 cmake 不会进入交叉编译模式，
+# 结果是**按 host 编出 x86_64 的 .a**，直到链接 ffmpeg 才报架构不匹配，
+# 错误信息离真正原因很远，所以必须在这里堵住。
+export CMAKE_TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+export ANDROID_PLATFORM="android-${ANDROID_API}"
+[ -f "$CMAKE_TOOLCHAIN" ] || { echo "找不到 NDK cmake toolchain：$CMAKE_TOOLCHAIN" >&2; exit 1; }
 
 # libvpx 不吃 CC 环境变量，只认 --sdk-path
 export ANDROID_NDK_HOME
