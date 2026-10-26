@@ -47,8 +47,10 @@ probe_pc_link() {
   local h
   : > "$td/t.c"
   for h in $hdrs; do printf '#include <%s>\n' "$h" >> "$td/t.c"; done
-  # 取地址强制产生符号引用，等价于 FFmpeg 的 check_func_headers
-  printf 'int main(void){ void *p = (void *)&%s; return p == NULL; }\n' "$func" >> "$td/t.c"
+  # 取地址强制产生符号引用，等价于 FFmpeg 的 check_func_headers。
+  # 注意用 0 而不是 NULL —— 这里没有 <stddef.h>，用 NULL 会先炸在编译期，
+  # 把真正的链接错误盖掉（第一版 probe 就是这么骗了自己一轮的）。
+  printf 'int main(void){ return (void *)&%s == 0; }\n' "$func" >> "$td/t.c"
 
   local cc_bin="${CC:-cc}"
   # 这里就是要词分割，flags 必须拆成多个参数

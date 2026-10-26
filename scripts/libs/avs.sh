@@ -40,6 +40,41 @@ build_davs2() {
     '    start = max(start, 0);' \
     '    start = (start > 0) ? start : 0;' 4
 
+  # ---- 上游 10bit 构建的真实缺陷：ALF 的 AVX2 实现从来没被编译过 ----
+  # source/common/alf.cc 在 `#if HIGH_BIT_DEPTH` 下会把
+  #   alf_block[0] = alf_filter_block_avx2_10bit
+  # 指过去，而该函数**只**定义在 source/common/vec/intrinsic_alf_avx2.c。
+  # 这个文件既不在 SRCS 也不在 SRCSAVX 里（而且它是 .c，其余同类文件都是 .cc）。
+  # 8bit 构建不引用它，所以这个洞一直没人发现；10bit 才暴露：
+  #   ld: libdavs2.a(alf.o): undefined reference to `davs2_alf_filter_block_avx2_10bit'
+  # FFmpeg configure 会把这种链接失败折叠成一句没头没脑的
+  #   ERROR: davs2 >= 1.6.0 not found using pkg-config
+  # 修法：把这个目标文件加进 OBJAVX（该集合的编译规则会额外带 -mavx2）。
+  # 必须用 $(if $(ARCH_X86),...) 包一层：下面这行 OBJAVX 的赋值在
+  # `ifdef ARCH_X86` **外面**，无条件追加会让 ARM/Android 也去编 AVX2 文件。
+  edit_exact "$bdir/Makefile" \
+    'OBJAVX += $(SRCSAVX:%.cc=%.o)' \
+    'OBJAVX += $(SRCSAVX:%.cc=%.o) $(if $(ARCH_X86),common/vec/intrinsic_alf_avx2.o)'
+
+  # 但 OBJAVX 的编译规则写死了源文件后缀 .cc，对 .c 文件会去找不存在的
+  # intrinsic_alf_avx2.cc。改成「.c 存在就用 .c，否则用 .cc」。
+  # 用 python 而不是 edit_exact：这条锚点以制表符开头，在 shell 里转义太容易出错。
+  python3 - "$bdir/Makefile" <<'PY'
+import sys
+p = sys.argv[1]
+with open(p, encoding='utf-8', errors='surrogateescape', newline='') as f:
+    s = f.read()
+old = "\t$(CC) $(CFLAGS) -mavx2 -c -o $@ $(SRCPATH)/$(@:.o=.cc)"
+new = ("\t$(CC) $(CFLAGS) -mavx2 -c -o $@ "
+       "$(SRCPATH)/$(if $(wildcard $(SRCPATH)/$(@:.o=.c)),$(@:.o=.c),$(@:.o=.cc))")
+if s.count(old) != 1:
+    sys.stderr.write("[davs2] OBJAVX 编译规则锚点匹配 %d 次，期望 1 次\n" % s.count(old))
+    sys.exit(1)
+with open(p, 'w', encoding='utf-8', errors='surrogateescape', newline='') as f:
+    f.write(s.replace(old, new))
+PY
+  ok "davs2: 把 intrinsic_alf_avx2.c 接进 OBJAVX 并放开 .c 后缀"
+
   local arch_opts=()
   case "${TARGET_ARCH:-x86_64}" in
     arm*|aarch64)
@@ -75,6 +110,19 @@ build_davs2() {
   # FFmpeg 6.1 的 configure 写死 "davs2 >= 1.6.0"，而 fork 自己生成的 .pc
   # 版本串未必达得到（它长期没更新 version 宏）。库能力是够的，只改声明。
   pc_ensure_version davs2 1.6.0
+
+  # 立刻验符号，别等到 30 分钟后 FFmpeg 链接时才炸（那时错误还被折叠成
+  # "not found using pkg-config"，根本看不出是缺符号）。
+  case "${TARGET_ARCH:-x86_64}" in
+    x86_64|i386|i486|i586|i686|x86)
+      if command -v nm >/dev/null 2>&1; then
+        nm -g --defined-only "$PREFIX/lib/libdavs2.a" 2>/dev/null \
+          | grep -q "davs2_alf_filter_block_avx2_10bit" \
+          || die "libdavs2.a 缺少 davs2_alf_filter_block_avx2_10bit —— intrinsic_alf_avx2.c 仍然没被编译（10bit 下 alf.cc 会引用它，静态链接必失败）"
+        ok "libdavs2.a 含 10bit ALF 的 AVX2 符号"
+      fi
+      ;;
+  esac
 }
 
 # ------------------------------------------------------------------------------
