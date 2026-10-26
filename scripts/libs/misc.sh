@@ -272,12 +272,27 @@ build_srt() {
 
   require_pc openssl
 
+  local extra=()
+  # Android API<21（armv7）的 bionic 没有 pthread_condattr_setclock（21 才加）。
+  # srt 的 sync.h 只要有 ENABLE_MONOTONIC_CLOCK 就会走
+  #   pthread_condattr_setclock(&CondAttribs, CLOCK_MONOTONIC)
+  # 这条路径，而 srt 的 cmake 探测的是 clock_gettime（API19 确实有），
+  # 于是它自信地打开 monotonic，编译期就报
+  #   error: use of undeclared identifier 'pthread_condattr_setclock'
+  # srt 官方给了开关：关掉后退回 CLOCK_REALTIME 的 condvar 超时，
+  # 对 FFmpeg 用到的 srt 协议无实际影响。API>=21 保持默认（更精确）。
+  if [ "${TARGET_OS:-}" = "android" ] && [ "${ANDROID_API:-99}" -lt 21 ]; then
+    extra+=("-DENABLE_MONOTONIC_CLOCK=OFF")
+    warn "srt: Android API ${ANDROID_API} 无 pthread_condattr_setclock，关闭 monotonic clock"
+  fi
+
   cmake_build "$dir" srt \
     -DENABLE_APPS=OFF \
     -DENABLE_SHARED=OFF \
     -DENABLE_STATIC=ON \
     -DUSE_ENCLIB=openssl \
-    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+    "${extra[@]}"
 
   require_pc srt
 }
