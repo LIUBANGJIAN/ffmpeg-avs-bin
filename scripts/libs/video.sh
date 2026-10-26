@@ -62,6 +62,12 @@ build_x265() {
   #     CMake 4 已经彻底删掉 CMP0054 的 OLD 行为，设 OLD 变成硬错误。
   #     改成 NEW（4.x 唯一允许的取值）；x265 里的 if() 都是
   #     `if("${var}" STREQUAL "...")` 这类写法，NEW 下语义不变。
+  #     同一个文件开头还有 `cmake_policy(SET CMP0025 OLD)`（把 Apple Clang
+  #     当成普通 Clang 报），CMake 4 同样不再接受 OLD —— 一并改 NEW；
+  #     我们三个平台都没有 Apple 编译器，这条改了没有任何副作用。
+  edit_exact "$dir/source/CMakeLists.txt" \
+    'cmake_policy(SET CMP0025 OLD) # report Apple'"'"'s Clang as just Clang' \
+    'cmake_policy(SET CMP0025 NEW) # CMake 4 已移除 OLD 行为'
   edit_exact "$dir/source/CMakeLists.txt" \
     'cmake_policy(SET CMP0054 OLD) # Only interpret if() arguments as variables or keywords when unquoted' \
     'cmake_policy(SET CMP0054 NEW) # CMake 4 已移除 OLD 行为'

@@ -48,6 +48,7 @@ jobs:
             autoconf
             automake
             libtool
+            gperf
             python
             perl
             mingw-w64-ucrt-x86_64-gcc
@@ -117,7 +118,7 @@ jobs:
               apk add --no-cache \
                 bash build-base linux-headers nasm cmake meson ninja pkgconf \
                 perl autoconf automake libtool git curl python3 zip file binutils \
-                diffutils \
+                diffutils gperf \
                 tar xz
               bash ./scripts/build-linux.sh
             '
@@ -162,7 +163,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential nasm cmake meson ninja-build pkg-config \
-            autoconf automake libtool zip unzip file binutils python3
+            autoconf automake libtool gperf zip unzip file binutils python3
 
       # NDK 有 600MB+，不缓存的话每次都要重下
       - name: 缓存 NDK r25c

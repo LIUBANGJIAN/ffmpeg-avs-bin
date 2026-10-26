@@ -84,6 +84,11 @@ build_ffmpeg() {
   _enable_if_pc fribidi  --enable-libfribidi
   _enable_if_pc harfbuzz --enable-libharfbuzz
   _enable_if_pc zimg     --enable-libzimg
+  # fontconfig：drawtext / subtitles 的字体选择。Windows 上我们没编它
+  # （libass 走 directwrite），所以只在其它平台尝试开启。
+  if [ "${TARGET_OS:-}" != "windows" ]; then
+    _enable_if_pc fontconfig --enable-libfontconfig
+  fi
 
   # ---------------- 网络 ----------------
   _enable_if_pc srt      --enable-libsrt
