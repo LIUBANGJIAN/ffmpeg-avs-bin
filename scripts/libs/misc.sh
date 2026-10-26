@@ -103,6 +103,25 @@ build_fontconfig() {
   require_pc expat
   require_pc freetype2
 
+  # ---- fontconfig 的 posix_fadvise 陷阱（只在 Android API 19 炸）----
+  # ① 检测方式不靠谱：configure.ac 用 AC_CHECK_SYMBOL，而这个宏**只 grep 头文件、
+  #    不试链接**。bionic 的 fcntl.h 在 API 19 里是有 posix_fadvise 声明的
+  #    （带 __INTRODUCED_IN(21) 标注），于是检测判为「有」；
+  #    但 21 以前的 libc 里根本没有这个符号 → 链接期 undefined symbol。
+  #    解法：Android 且 API<21 时直接把 configure 缓存变量钉成 0。
+  # ② 守卫也写错了：AC_DEFINE_UNQUOTED(HAVE_POSIX_FADVISE, 0) 在值为 0 时**仍然
+  #    是 defined**，而 fccache.c 用的是 `#if defined(HAVE_POSIX_FADVISE)`，
+  #    结果是「检测为 0」也照样编译进去。补上 && HAVE_POSIX_FADVISE 才真的排除。
+  # 只影响 fc-cache 里一个 mmap 预读提示，对 FFmpeg 无任何影响。
+  edit_exact "$dir/src/fccache.c" \
+    '#if defined(HAVE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)' \
+    '#if defined(HAVE_POSIX_FADVISE) && HAVE_POSIX_FADVISE && defined(POSIX_FADV_WILLNEED)'
+
+  if [ "${TARGET_OS:-}" = "android" ] && [ "${ANDROID_API:-99}" -lt 21 ]; then
+    export ac_cv_func_posix_fadvise=0
+    warn "fontconfig: Android API ${ANDROID_API} 没有 posix_fadvise，强制 HAVE_POSIX_FADVISE=0"
+  fi
+
   local fontdir="/usr/share/fonts"
   [ "${TARGET_OS:-}" = "android" ] && fontdir="/system/fonts"
 
