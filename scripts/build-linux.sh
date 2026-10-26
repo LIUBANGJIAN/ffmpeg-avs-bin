@@ -49,6 +49,17 @@ source "$ROOT/scripts/libs/misc.sh"
 source "$ROOT/scripts/build-ffmpeg.sh"
 source "$ROOT/scripts/build-common.sh"
 
+# 依赖全部自建在 $PREFIX 下（Alpine 只装了工具链，没装任何 -dev 包）。
+# 带 .pc 的库会把 -L$PREFIX/lib 一起带出来，但 FFmpeg 对 **libmp3lame** 走的是
+# 裸 check_lib（lame 3.100 上游不提供 .pc，我们补的 lame.pc 只用于脚本自己
+# 判断"要不要 --enable-libmp3lame"），此时链接行只有全局 ldflags：
+#   gcc -static ... -o test test.o -lmp3lame -lm -lstdc++
+# 缺 -L 就报 cannot find -lmp3lame → ERROR: libmp3lame >= 3.98.3 not found。
+# 这条在 android-arm64 上已经实测踩到（run#16），linux 只是还没走到那一步
+# （前面先死在 davs2），一并堵掉。
+# 必须放在 source lib.sh 之后：PREFIX 定义在那里，提前引用会触发 set -u。
+export EXTRA_LDFLAGS="-L$PREFIX/lib"
+
 # ---------------- 干活 ----------------
 build_everything
 
