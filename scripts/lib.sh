@@ -360,6 +360,34 @@ EOF
   ok "生成 $pcdir/$name.pc"
 }
 
+# ------------------------------------------------------------------
+# Android：把 .pc 里的 -lpthread / -ldl 摘掉
+#
+# bionic 没有独立的 libpthread.so / libdl.so —— pthread_* 与 dl* 的符号全在
+# libc 里，链接 `-lpthread` 直接 "unable to find library -lpthread"。
+# 而大量上游 .pc（uavs3d / uavs3e / srt / zimg …）在 Linux 上探测到 pthread 后
+# 就无条件写进 Libs，跨到 Android 就全是雷。
+#
+# 影响面：FFmpeg 的 require_pkg_config 会用这些 flags 真链一次，链接失败后
+# 只报一句 "xxx not found using pkg-config"，能力被静默关掉
+# （run#12 android-arm64 的 uavs3d / uavs3e 就是）。所以必须在 configure 前清掉。
+# ------------------------------------------------------------------
+fix_android_pc_files() {
+  [ "${TARGET_OS:-}" = "android" ] || return 0
+  local pc n=0
+  for pc in "$PREFIX"/lib/pkgconfig/*.pc; do
+    [ -f "$pc" ] || continue
+    if grep -q -- '-lpthread\|-ldl' "$pc"; then
+      sed -i -E 's/[[:space:]]*-lpthread//g; s/[[:space:]]*-ldl//g' "$pc"
+      n=$((n + 1))
+    fi
+  done
+  if [ "$n" -gt 0 ]; then
+    ok "android: 已从 $n 个 .pc 里摘掉 -lpthread/-ldl（bionic 里它们在 libc）"
+  fi
+  return 0
+}
+
 # install_static_lib <静态库路径> <目标名(不含lib前缀和.a后缀)>
 install_static_lib() {
   local src="$1" name="$2"

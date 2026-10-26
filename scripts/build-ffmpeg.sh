@@ -219,6 +219,7 @@ build_ffmpeg() {
   # 等于没有信息，与其等 configure 抛一句 not found，不如现在就把真实原因喊出来
   # 兜底再测一次（正常情况下 build_everything 在 AVS 阶段已经测过了；
   # 这里保留是因为单独跑 build_ffmpeg 时也要有防护）
+  fix_android_pc_files
   probe_avs_pc_links || true
 
   log "configure FFmpeg ${FFMPEG_VERSION} (${TARGET_OS}/${TARGET_ARCH})"

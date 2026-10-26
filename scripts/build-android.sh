@@ -155,7 +155,17 @@ export ANDROID_NDK_HOME
 
 # ---------------- FFmpeg 专属参数 ----------------
 # 注意是**字符串**而不是数组：bash 无法导出数组，build-ffmpeg.sh 按空格拆
+#
+# 为什么必须显式给 --cc / --cxx / --ar / --nm / --ranlib / --strip：
+# FFmpeg 的 configure **不读 CC 环境变量**，而且对 android 还有一段硬编码
+#   if test "$target_os" = android; then cc_default="clang"; fi
+# 于是它拿 PATH 里那个**没有 -target**的裸 clang 去编：
+#   clang --sysroot=... -march=armv8-a -c ...  →  error: unknown target CPU 'armv8-a'
+# 因为裸 clang 默认按宿主机 x86_64 出活，-march=armv8-a 对 x86_64 是非法值。
+# 就算侥幸过了这一关，编出来的也会是 x86_64 目标文件，直到最后链接才发现。
+# 显式把 NDK 的 wrapper 传进去，target 才真的是 aarch64/armv7-linux-androidNN。
 FF_EXTRA_ARGS="--target-os=android --arch=${FF_ARCH} --cpu=${FF_CPU} --enable-cross-compile --sysroot=${TC}/sysroot"
+FF_EXTRA_ARGS+=" --cc=${CC} --cxx=${CXX} --ar=${AR} --nm=${NM} --ranlib=${RANLIB} --strip=${STRIP}"
 # API 19 的 bionic 没有 iconv，留着会让 configure 探测出一堆假阳性
 if [ "$ANDROID_API" -lt 21 ]; then
   FF_EXTRA_ARGS+=" --disable-iconv"

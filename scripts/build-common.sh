@@ -26,6 +26,7 @@ build_everything() {
   #      而它排在第 6 步（所有依赖之后）。若某个库静态链接缺符号，
   #      configure 会报一句没头没脑的 "xxx not found using pkg-config"，
   #      而且还要等 30 分钟才看到。挪到这里，3 分钟内就能定位。
+  fix_android_pc_files
   probe_avs_pc_links || warn "AVS 库链接自测未全部通过，FFmpeg configure 大概率会失败（原因见上）"
 
   # 3) 视频
