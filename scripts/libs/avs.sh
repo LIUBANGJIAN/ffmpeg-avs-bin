@@ -224,6 +224,26 @@ endif()'
 #define ENABLE_FUNCTION_ARM32 1' \
 '#define ENABLE_FUNCTION_C 1'
 
+  # uavs3d 1.1 的 source/decore/threadpool.h 第 15 行是一条 **写在非 Windows 分支里**
+  # 的 MSVC 指令（上游 copy-paste 事故）：
+  #     #if defined(_WIN32)
+  #     #include "win32thread.h"
+  #     #else
+  #     #pragma comment(lib, "pthreadVC2.lib")   <-- 这里，POSIX 分支
+  #     #include <pthread.h>
+  # clang 会把它编成目标文件里的 .linker-options 段：
+  #   - GNU ld 把不认识的段当垃圾忽略 → linux / mingw 一路无事（所以一直没暴露）
+  #   - **NDK 用的 lld 会真的去解析**，于是任何 include 了 threadpool.h 的目标文件
+  #     一旦被拉进链接就报：
+  #       ld: error: libuavs3d.a(uavs3d.c.o): unable to find library from
+  #                dependent library specifier: pthreadVC2.lib
+  #     而 FFmpeg configure 把它折叠成一句没头没尾的
+  #       ERROR: uavs3d >= 1.1.41 not found using pkg-config
+  # 在 POSIX 上引 pthread 走的就是下面那行 <pthread.h>，这条 pragma 纯属多余，删掉。
+  edit_exact "$dir/source/decore/threadpool.h" \
+    '#pragma comment(lib, "pthreadVC2.lib")' \
+    '/* 上游把 Windows 的 #pragma comment(lib) 错写进了非 Windows 分支；lld 会当真，删掉 */'
+
   log "cmake build uavs3d (10bit)"
   # 只编库目标：test/uavs3dec 会 target_link_libraries(… pthread)，
   # 而 Android 的 bionic 把 pthread 并进了 libc，没有独立 -lpthread，
