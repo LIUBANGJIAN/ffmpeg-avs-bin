@@ -105,22 +105,37 @@ build_fontconfig() {
 
   # ---- fontconfig 的 posix_fadvise 陷阱（只在 Android API 19 炸）----
   # ① 检测方式不靠谱：configure.ac 用 AC_CHECK_SYMBOL，而这个宏**只 grep 头文件、
-  #    不试链接**。bionic 的 fcntl.h 在 API 19 里是有 posix_fadvise 声明的
+  #    不试链接**。bionic 的 fcntl.h 在 API 19 里就有 posix_fadvise 的声明
   #    （带 __INTRODUCED_IN(21) 标注），于是检测判为「有」；
-  #    但 21 以前的 libc 里根本没有这个符号 → 链接期 undefined symbol。
-  #    解法：Android 且 API<21 时直接把 configure 缓存变量钉成 0。
-  # ② 守卫也写错了：AC_DEFINE_UNQUOTED(HAVE_POSIX_FADVISE, 0) 在值为 0 时**仍然
-  #    是 defined**，而 fccache.c 用的是 `#if defined(HAVE_POSIX_FADVISE)`，
-  #    结果是「检测为 0」也照样编译进去。补上 && HAVE_POSIX_FADVISE 才真的排除。
-  # 只影响 fc-cache 里一个 mmap 预读提示，对 FFmpeg 无任何影响。
-  edit_exact "$dir/src/fccache.c" \
-    '#if defined(HAVE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)' \
-    '#if defined(HAVE_POSIX_FADVISE) && HAVE_POSIX_FADVISE && defined(POSIX_FADV_WILLNEED)'
-
-  if [ "${TARGET_OS:-}" = "android" ] && [ "${ANDROID_API:-99}" -lt 21 ]; then
-    export ac_cv_func_posix_fadvise=0
-    warn "fontconfig: Android API ${ANDROID_API} 没有 posix_fadvise，强制 HAVE_POSIX_FADVISE=0"
-  fi
+  #    可 21 以前的 libc 里根本没有这个符号 → 链接期 undefined symbol。
+  # ② 守卫也写错了：AC_DEFINE_UNQUOTED(HAVE_POSIX_FADVISE, 0) 在值为 0 时
+  #    依然是 defined，而 fccache.c 用的是 #if defined(HAVE_POSIX_FADVISE)，
+  #    于是「检测为 0」也照样编译进去。
+  # 试过用 ac_cv_func_posix_fadvise=0 绕开检测，结果更糟：缓存变量一旦预设，
+  # AC_CHECK_SYMBOL 的成功/失败分支都不执行，fc_func_posix_fadvise 变成空串，
+  # config.h 里就成了 `#define HAVE_POSIX_FADVISE`（无值），
+  # 编译报 "invalid token at start of a preprocessor expression"。
+  # 最终做法：直接删掉这 3 行。它只是 fc-cache 里一次 mmap 预读提示
+  # （POSIX_FADV_WILLNEED），删掉只影响 fc-cache 自己的读盘策略，
+  # 与 FFmpeg / libass 无任何关系。
+  python3 - "$dir/src/fccache.c" <<'PY'
+import sys
+p = sys.argv[1]
+with open(p, encoding='utf-8', errors='surrogateescape', newline='') as f:
+    s = f.read()
+old = ("#if defined(HAVE_POSIX_FADVISE) && defined(POSIX_FADV_WILLNEED)\n"
+       "\tposix_fadvise (fd, 0, fd_stat->st_size, POSIX_FADV_WILLNEED);\n"
+       "#endif\n")
+new = ("/* posix_fadvise 已移除：Android API<21 的 bionic 只有声明没有符号，\n"
+       " * 而 fontconfig 的 AC_CHECK_SYMBOL 只 grep 头文件、不试链接，防线全失。\n"
+       " * 这只是一次 mmap 预读提示，删掉不影响功能。 */\n")
+if s.count(old) != 1:
+    sys.stderr.write("[fontconfig] posix_fadvise 锚点匹配 %d 次，期望 1 次\n" % s.count(old))
+    sys.exit(1)
+with open(p, 'w', encoding='utf-8', errors='surrogateescape', newline='') as f:
+    f.write(s.replace(old, new))
+PY
+  ok "fontconfig: 移除 posix_fadvise 调用（fc-cache 的预读提示）"
 
   local fontdir="/usr/share/fonts"
   [ "${TARGET_OS:-}" = "android" ] && fontdir="/system/fonts"

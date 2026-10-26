@@ -58,6 +58,10 @@ build_davs2() {
 
   # 但 OBJAVX 的编译规则写死了源文件后缀 .cc，对 .c 文件会去找不存在的
   # intrinsic_alf_avx2.cc。改成「.c 存在就用 .c，否则用 .cc」。
+  # 而且**必须加 -x c**：这个文件是纯 C（里面到处是 `const pel_t* → pel_t*`
+  # 的隐式转换，比如 _mm256_loadu_si256((__m256i*)p_src + k)），
+  # 用 g++ 按 C++ 编会直接 -fpermissive 报一串 invalid conversion。
+  # davs2 的 CFLAGS 里没有 -std=c++xx，所以 g++ -x c 走 C 前端没有问题。
   # 用 python 而不是 edit_exact：这条锚点以制表符开头，在 shell 里转义太容易出错。
   python3 - "$bdir/Makefile" <<'PY'
 import sys
@@ -65,7 +69,8 @@ p = sys.argv[1]
 with open(p, encoding='utf-8', errors='surrogateescape', newline='') as f:
     s = f.read()
 old = "\t$(CC) $(CFLAGS) -mavx2 -c -o $@ $(SRCPATH)/$(@:.o=.cc)"
-new = ("\t$(CC) $(CFLAGS) -mavx2 -c -o $@ "
+new = ("\t$(CC) $(CFLAGS) -mavx2 $(if $(wildcard $(SRCPATH)/$(@:.o=.c)),-x c) "
+       "-c -o $@ "
        "$(SRCPATH)/$(if $(wildcard $(SRCPATH)/$(@:.o=.c)),$(@:.o=.c),$(@:.o=.cc))")
 if s.count(old) != 1:
     sys.stderr.write("[davs2] OBJAVX 编译规则锚点匹配 %d 次，期望 1 次\n" % s.count(old))
@@ -73,7 +78,7 @@ if s.count(old) != 1:
 with open(p, 'w', encoding='utf-8', errors='surrogateescape', newline='') as f:
     f.write(s.replace(old, new))
 PY
-  ok "davs2: 把 intrinsic_alf_avx2.c 接进 OBJAVX 并放开 .c 后缀"
+  ok "davs2: intrinsic_alf_avx2.c 接入 OBJAVX（.c 走 -x c）"
 
   local arch_opts=()
   case "${TARGET_ARCH:-x86_64}" in
