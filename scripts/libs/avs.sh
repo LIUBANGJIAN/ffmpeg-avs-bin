@@ -44,41 +44,28 @@ build_davs2() {
   # source/common/alf.cc 在 `#if HIGH_BIT_DEPTH` 下会把
   #   alf_block[0] = alf_filter_block_avx2_10bit
   # 指过去，而该函数**只**定义在 source/common/vec/intrinsic_alf_avx2.c。
-  # 这个文件既不在 SRCS 也不在 SRCSAVX 里（而且它是 .c，其余同类文件都是 .cc）。
-  # 8bit 构建不引用它，所以这个洞一直没人发现；10bit 才暴露：
+  # 这个文件既不在 SRCS 也不在 SRCSAVX 里（而且它是 .c，同类文件都是 .cc）。
+  # 8bit 构建不引用它，所以这个洞一直没人发现；10bit 才暴露成
   #   ld: libdavs2.a(alf.o): undefined reference to `davs2_alf_filter_block_avx2_10bit'
-  # FFmpeg configure 会把这种链接失败折叠成一句没头没脑的
+  # 再被 FFmpeg configure 折叠成一句没头没脑的
   #   ERROR: davs2 >= 1.6.0 not found using pkg-config
-  # 修法：把这个目标文件加进 OBJAVX（该集合的编译规则会额外带 -mavx2）。
-  # 必须用 $(if $(ARCH_X86),...) 包一层：下面这行 OBJAVX 的赋值在
-  # `ifdef ARCH_X86` **外面**，无条件追加会让 ARM/Android 也去编 AVX2 文件。
-  edit_exact "$bdir/Makefile" \
-    'OBJAVX += $(SRCSAVX:%.cc=%.o)' \
-    'OBJAVX += $(SRCSAVX:%.cc=%.o) $(if $(ARCH_X86),common/vec/intrinsic_alf_avx2.o)'
-
-  # 但 OBJAVX 的编译规则写死了源文件后缀 .cc，对 .c 文件会去找不存在的
-  # intrinsic_alf_avx2.cc。改成「.c 存在就用 .c，否则用 .cc」。
-  # 而且**必须加 -x c**：这个文件是纯 C（里面到处是 `const pel_t* → pel_t*`
-  # 的隐式转换，比如 _mm256_loadu_si256((__m256i*)p_src + k)），
-  # 用 g++ 按 C++ 编会直接 -fpermissive 报一串 invalid conversion。
-  # davs2 的 CFLAGS 里没有 -std=c++xx，所以 g++ -x c 走 C 前端没有问题。
-  # 用 python 而不是 edit_exact：这条锚点以制表符开头，在 shell 里转义太容易出错。
-  python3 - "$bdir/Makefile" <<'PY'
-import sys
-p = sys.argv[1]
-with open(p, encoding='utf-8', errors='surrogateescape', newline='') as f:
-    s = f.read()
-old = "\t$(CC) $(CFLAGS) -mavx2 -c -o $@ $(SRCPATH)/$(@:.o=.cc)"
-new = ("\t$(CC) $(CFLAGS) -mavx2 $(if $(wildcard $(SRCPATH)/$(@:.o=.c)),-x c) "
-       "-c -o $@ "
-       "$(SRCPATH)/$(if $(wildcard $(SRCPATH)/$(@:.o=.c)),$(@:.o=.c),$(@:.o=.cc))")
-if s.count(old) != 1:
-    sys.stderr.write("[davs2] OBJAVX 编译规则锚点匹配 %d 次，期望 1 次\n" % s.count(old))
-    sys.exit(1)
-with open(p, 'w', encoding='utf-8', errors='surrogateescape', newline='') as f:
-    f.write(s.replace(old, new))
-PY
-  ok "davs2: intrinsic_alf_avx2.c 接入 OBJAVX（.c 走 -x c）"
+  #
+  # 试过把它塞进 OBJAVX 去真编：
+  #   - 按 C++ 编（g++ 默认）：一串 invalid conversion from 'const pel_t*' to 'pel_t*'
+  #   - 加 -x c 按 C 编：能编过，但目标文件进了压缩包之后 nm 仍然找不到符号
+  #     （上游那套 OBJAVX 规则/依赖关系不是给 .c 设计的）
+  # 收益只是「10bit ALF 用 AVX2 而不是 SSE4」，风险和排查成本都不划算。
+  # 最终选择退回 SSE4 的 10bit 实现（intrinsic_alf.cc，一直是编译的），
+  # 仍然是 SIMD。这是本项目里唯一一处「有意识的性能取舍」。
+  edit_exact "$dir/source/common/alf.cc" \
+    '        if (cpuid & (DAVS2_CPU_AVX2)) {
+            fh->alf_block[0] = alf_filter_block_avx2_10bit;
+        }
+' \
+    '        /* AVX2 版 10bit ALF 的实现文件 intrinsic_alf_avx2.c 上游从未接入
+         * 构建（不在 SRCS/SRCSAVX），引用它必然 undefined reference。
+         * 这里保留上一步设好的 SSE4 10bit 实现。 */
+'
 
   local arch_opts=()
   case "${TARGET_ARCH:-x86_64}" in
@@ -121,10 +108,15 @@ PY
   case "${TARGET_ARCH:-x86_64}" in
     x86_64|i386|i486|i586|i686|x86)
       if command -v nm >/dev/null 2>&1; then
-        nm -g --defined-only "$PREFIX/lib/libdavs2.a" 2>/dev/null \
-          | grep -q "davs2_alf_filter_block_avx2_10bit" \
-          || die "libdavs2.a 缺少 davs2_alf_filter_block_avx2_10bit —— intrinsic_alf_avx2.c 仍然没被编译（10bit 下 alf.cc 会引用它，静态链接必失败）"
-        ok "libdavs2.a 含 10bit ALF 的 AVX2 符号"
+        local _libdavs2="$PREFIX/lib/libdavs2.a"
+        nm -g --defined-only "$_libdavs2" 2>/dev/null \
+          | grep -q "davs2_alf_filter_block_sse128_10bit" \
+          || die "libdavs2.a 里没有 10bit ALF 的 SSE4 实现 —— 10bit 解码的 ALF 会缺符号"
+        if nm -g --undefined-only "$_libdavs2" 2>/dev/null \
+             | grep -q "davs2_alf_filter_block_avx2_10bit"; then
+          die "libdavs2.a 仍对 davs2_alf_filter_block_avx2_10bit 有未定义引用（alf.cc 的 AVX2 分支没摘掉？）"
+        fi
+        ok "libdavs2.a: 10bit ALF 走 SSE4，且无 AVX2 未定义引用"
       fi
       ;;
   esac
