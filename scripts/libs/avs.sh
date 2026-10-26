@@ -57,15 +57,11 @@ build_davs2() {
   # 收益只是「10bit ALF 用 AVX2 而不是 SSE4」，风险和排查成本都不划算。
   # 最终选择退回 SSE4 的 10bit 实现（intrinsic_alf.cc，一直是编译的），
   # 仍然是 SIMD。这是本项目里唯一一处「有意识的性能取舍」。
+  # 注意锚点必须是**单行**：davs2 的源码是 CRLF 换行，多行锚点里的 \n 永远匹配不上
+  # （run#14 就在这里「锚点匹配 0 次」）。
   edit_exact "$dir/source/common/alf.cc" \
-    '        if (cpuid & (DAVS2_CPU_AVX2)) {
-            fh->alf_block[0] = alf_filter_block_avx2_10bit;
-        }
-' \
-    '        /* AVX2 版 10bit ALF 的实现文件 intrinsic_alf_avx2.c 上游从未接入
-         * 构建（不在 SRCS/SRCSAVX），引用它必然 undefined reference。
-         * 这里保留上一步设好的 SSE4 10bit 实现。 */
-'
+    '            fh->alf_block[0] = alf_filter_block_avx2_10bit;' \
+    '            /* AVX2 版 10bit ALF 上游从未接入构建，保留上面的 SSE4 实现 */'
 
   local arch_opts=()
   case "${TARGET_ARCH:-x86_64}" in
