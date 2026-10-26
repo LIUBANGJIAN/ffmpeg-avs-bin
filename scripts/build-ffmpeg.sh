@@ -128,6 +128,12 @@ build_ffmpeg() {
     # 否则静态链接会在最后一步报一堆 undefined reference
     --pkg-config-flags=--static
     --enable-gpl
+    # OpenSSL 3.x 是 Apache-2.0，和 GPLv2 不兼容：FFmpeg 的 configure 碰到
+    # "openssl >= 3.0.0" 会直接 die：
+    #   ERROR: OpenSSL >=3.0.0 requires --enable-version3
+    # 我们三平台都用自建的 OpenSSL 3.x，所以必须开 version3（= GPLv3）。
+    # 这也是"完整版"路线上的必然选择：gyan.dev 的 full build 同样是 GPLv3。
+    --enable-version3
     --enable-pic
     # 可复现构建：把构建路径信息压掉
     --disable-stripping
