@@ -126,6 +126,33 @@ export EXTRA_CFLAGS="-I$PREFIX/include"
 
 # meson 没有 --host 那套，跨平台必须给 cross file
 export MESON_CROSS_FILE="$WORK/meson-${PKG_ABI_NAME}.ini"
+
+# ---- harfbuzz 在 API<21 上会引用 bionic 21 才有的 locale 函数 ----
+# harfbuzz 10.x 的 hb.hh 里有这么一段：
+#   #if !defined(HB_NO_SETLOCALE) && (!defined(HAVE_NEWLOCALE) || !defined(HAVE_USELOCALE))
+#   #define HB_NO_SETLOCALE 1
+#   #endif
+#   #ifndef HB_NO_SETLOCALE
+#     #define hb_locale_t locale_t
+#     #define hb_uselocale uselocale
+#   #else
+#     #define hb_locale_t void *
+#     #define hb_uselocale(Locale) ((hb_locale_t) 0)   <-- 连参数都不展开
+#   #endif
+# 也就是说只要 HAVE_NEWLOCALE + HAVE_USELOCALE 都被探测到，它就会去调
+# newlocale/freelocale/uselocale，而这三个是 bionic API 21 才有的符号。
+# 坑在于 meson 的 has_function 探测能过（它链接时用的是通用 stub），
+# 真正按 API19 链接时才炸：
+#   ld: error: undefined symbol: newlocale / freelocale / uselocale
+#   ERROR: harfbuzz not found using pkg-config     （run#17 android-armv7）
+# 官方开关 HB_NO_SETLOCALE 正好关掉这块；注意上面的宏定义是**不展开参数**的，
+# 所以 hb-common.cc 里 get_C_locale() 消失也不会影响编译。
+# 只对 API<21 打开 —— 21 及以上没有任何理由牺牲 locale 行为。
+MESON_API19_EXTRA=""
+if [ "$ANDROID_API" -lt 21 ]; then
+  MESON_API19_EXTRA=", '-DHB_NO_SETLOCALE'"
+fi
+
 cat > "$MESON_CROSS_FILE" <<EOF
 [binaries]
 c = '$CC'
@@ -152,9 +179,9 @@ needs_exe_wrapper = true
 # 交叉编译时 meson 会忽略环境里的 CFLAGS，必须在这里显式给，
 # 否则 -fPIC / -D__ANDROID_API__ 全丢，dav1d 这类库会按 host 默认值编。
 [built-in options]
-c_args = ['-O2', '-fPIC', '-D__ANDROID_API__=$ANDROID_API']
+c_args = ['-O2', '-fPIC', '-D__ANDROID_API__=$ANDROID_API'$MESON_API19_EXTRA]
 c_link_args = ['-D__ANDROID_API__=$ANDROID_API']
-cpp_args = ['-O2', '-fPIC', '-D__ANDROID_API__=$ANDROID_API']
+cpp_args = ['-O2', '-fPIC', '-D__ANDROID_API__=$ANDROID_API'$MESON_API19_EXTRA]
 cpp_link_args = ['-D__ANDROID_API__=$ANDROID_API']
 EOF
 
