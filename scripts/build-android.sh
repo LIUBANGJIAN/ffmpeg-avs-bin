@@ -86,8 +86,15 @@ export NM="$TC/bin/llvm-nm"
 export CFLAGS="-O2 -fPIC -D__ANDROID_API__=${ANDROID_API}"
 export CXXFLAGS="$CFLAGS"
 export LDFLAGS=""
-# davs2 / xavs2 / zimg 是 C++，用 clang 驱动链接时必须显式带 NDK 的静态 C++ 运行库
-export EXTRA_LIBS="-lc++_static -lc++abi"
+# davs2 / xavs2 / zimg 是 C++，用 clang 驱动链接时必须显式带 NDK 的静态 C++ 运行库。
+# `-lm` 也必须在：与 glibc/musl/mingw 不同，bionic 的 libm 是**独立库**，
+# `sin/cos/modf/expf/powf/logf/log10f/nextafter` 不会从 libc 解析出来。
+# 而 zimg 上游的 zimg.pc.in 是 `Libs.private: @STL_LIBS@`，**从来不写 -lm**
+# （glibc/musl 下靠 libc 或 libstdc++ 就能过，所以 linux/windows 一直没事），
+# 于是 android 上 configure 检查 zimg 时满屏
+#   ld: error: undefined symbol: modf / nextafter / expf / sin / cos
+# 折叠成一句 `ERROR: zimg >= 2.7.0 not found using pkg-config`（run#20）。
+export EXTRA_LIBS="-lc++_static -lc++abi -lm"
 
 # 防止跨平台污染：ubuntu runner 上装了 libssl-dev/zlib1g-dev 时，
 # pkg-config 会找到 **x86 主机版** .pc，然后把 x86 的库链进 ARM 产物。
