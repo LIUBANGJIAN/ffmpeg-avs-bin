@@ -400,6 +400,17 @@ fix_android_pc_files() {
       sed -i -E 's/[[:space:]]*-l:libunwind\.a//g' "$pc"
       hit=1
     fi
+    # NDK 里的 `libstdc++.so` / `libc++.so` 不是真库，而是指向 **动态** 运行库的
+    # 兼容脚本（`INPUT(-lc++_shared)`）。任何 .pc 只要写了 `-lstdc++` 或 `-lc++`，
+    # 最终产物就会多出一条 `NEEDED: libc++_shared.so` —— 单文件静态发布直接废掉。
+    # zimg 的上游 zimg.pc.in 就是 `Libs.private: @STL_LIBS@`，默认 `-lstdc++`；
+    # x265 的 CMake 会从 CMAKE_CXX_IMPLICIT_LINK_LIBRARIES 里捡出 `c++`。
+    # 静态 C++ 运行库我们已经在 EXTRA_LIBS 里统一给了 `-lc++_static -lc++abi`，
+    # 所以这里把这两条**裸**名字清掉即可（不能碰 -lc++_static / -lc++abi）。
+    if grep -qE -- '(^|[[:space:]])-l(stdc\+\+|c\+\+)([[:space:]]|$)' "$pc"; then
+      sed -i -E 's/(^|[[:space:]])-lstdc\+\+([[:space:]]|$)/\1\2/g; s/(^|[[:space:]])-lc\+\+([[:space:]]|$)/\1\2/g' "$pc"
+      hit=1
+    fi
     if [ "$hit" = "1" ]; then n=$((n + 1)); fi
   done
   if [ "$n" -gt 0 ]; then

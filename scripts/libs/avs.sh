@@ -360,6 +360,39 @@ endif()'
     '#pragma comment(lib, "pthreadVC2.lib")' \
     '/* 上游把 Windows 的 #pragma comment(lib) 错写进了非 Windows 分支；lld 会当真，删掉 */'
 
+  # 8) 线程栈：musl 的默认线程栈只有 128 KiB，glibc / mingw 是 8 MiB。
+  #    src/com_thread.c 建线程池时传的是 attr = NULL（用默认值），而编码线程要跑
+  #    CU 递归 + RDOQ，栈帧很深 —— 同样是这份代码，在 glibc/mingw 上跑得好好的，
+  #    在 Alpine(musl) 上一进编码就
+  #      Segmentation fault (core dumped)
+  #    （run#21 linux 冒烟：`-c:v libuavs3e` 直接段错误，windows 同一份代码全过）。
+  #    这里给线程池线程显式 8 MiB 栈；_WIN32 分支保持原样，不碰已经跑通的平台。
+  edit_exact "$dir/src/com_thread.c" \
+'    for (i = 0; i < pool->threads; i++) {
+        if (uavs3e_pthread_create(pool->thread_handle + i, NULL, (uavs3e_tfunc_a_t)uavs3e_threadpool_thread, pool)) {
+            goto fail;
+        }
+    }' \
+'    for (i = 0; i < pool->threads; i++) {
+#if defined(_WIN32)
+        if (uavs3e_pthread_create(pool->thread_handle + i, NULL, (uavs3e_tfunc_a_t)uavs3e_threadpool_thread, pool)) {
+            goto fail;
+        }
+#else
+        /* 显式给 8 MiB 栈：musl 的默认线程栈只有 128 KiB，编码线程的 CU 递归会撑爆它 */
+        {
+            uavs3e_pthread_attr_t attr;
+            uavs3e_pthread_attr_init(&attr);
+            pthread_attr_setstacksize(&attr, (size_t)8 << 20);
+            if (uavs3e_pthread_create(pool->thread_handle + i, &attr, (uavs3e_tfunc_a_t)uavs3e_threadpool_thread, pool)) {
+                uavs3e_pthread_attr_destroy(&attr);
+                goto fail;
+            }
+            uavs3e_pthread_attr_destroy(&attr);
+        }
+#endif
+    }'
+
   log "cmake build uavs3e (8bit)"
   # 位深显式锁 8bit，不是偷懒，是因为「10bit 编码」这条路现在走不通：
   #   - uavs3e 的开关是顶层 CMakeLists 里的 add_definitions(-DCOMPILE_10BIT=1)，

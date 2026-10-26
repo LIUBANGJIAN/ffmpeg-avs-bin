@@ -134,7 +134,15 @@ static int uavs3e_init(AVCodecContext *avctx)
     av_log(NULL, AV_LOG_INFO, "uavs3e cfg: wpp_thread:%d  frm_thread:%d\n", ec->avs3_cfg.wpp_threads, ec->avs3_cfg.frm_threads);		
 
 	ec->handle = uavs3e_create(&ec->avs3_cfg, NULL);
-	
+    if (!ec->handle) {
+        // uavs3e_create 里 com_malloc 失败 / refine_input_cfg 校验不过都会走到这里。
+        // 上游不检查返回值，我们再不检查就只能在下一帧 deref NULL 崩掉，
+        // CI 上会表现为一条毫无线索的 Segmentation fault。
+        av_log(avctx, AV_LOG_ERROR, "libuavs3e: uavs3e_create 返回 NULL（配置被拒或内存不足）\n");
+        return AVERROR_EXTERNAL;
+    }
+    av_log(avctx, AV_LOG_INFO, "libuavs3e: encoder created\n");
+
     return 0;
 }
 
@@ -195,6 +203,11 @@ static int uavs3e_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
 
     if (frame) {
         uavs3e_get_img(ec->handle, &img_enc);
+        if (!img_enc) {
+            // 取不到空闲图像时上游会返回 NULL；直接解引用就是段错误。
+            av_log(avctx, AV_LOG_ERROR, "libuavs3e: uavs3e_get_img 返回空图像\n");
+            return AVERROR_EXTERNAL;
+        }
 		img_enc->pts = frame->pts;
         uavs3e_image_copy_pic(img_enc->planes, img_enc->stride, frame->data, frame->linesize, avctx->pix_fmt, img_enc->width[0], img_enc->height[0]);
     }
@@ -206,7 +219,11 @@ static int uavs3e_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
         memcpy(pkt->data, stat.buf, stat.bytes);
         pkt->size = stat.bytes;
         pkt->pts  = stat.pts;
-        pkt->dts  = stat.dts - 4 * avctx->time_base.num;
+        // 原来这里是 `stat.dts - 4 * time_base.num`，减掉一个凭空的 4 帧偏移，
+        // 结果是 muxer 一直喊 "non monotonically increasing dts"（run#21 windows
+        // 冒烟里刷了二十多条），B 帧重排后的 dts 全被打乱。uavs3e 自己算好了
+        // dts（uavs3e.c:1484），原样用即可，只把负数钳到 0。
+        pkt->dts  = stat.dts < 0 ? 0 : stat.dts;
 
 		if (stat.type == SLICE_I) {
             pkt->flags |= AV_PKT_FLAG_KEY;
@@ -243,7 +260,11 @@ static int uavs3e_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
 static int uavs3e_close(AVCodecContext *avctx)
 { 
     UAVS3EContext *ec = avctx->priv_data;
-    uavs3e_free(ec->handle);
+    // init 失败时 handle 是 NULL，uavs3e_free(NULL) 会一路崩到 uavs3e_enc 里
+    if (ec && ec->handle) {
+        uavs3e_free(ec->handle);
+        ec->handle = NULL;
+    }
 	
     return 0;
 } 

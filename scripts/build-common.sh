@@ -131,7 +131,9 @@ smoke_test() {
   log "冒烟测试：AVS3 编码真跑一次"
   local tmp="$BLD/smoke-$$"
   mkdir -p "$tmp"
-  "$bin" -hide_banner -loglevel error -y \
+  # 这里用 info 而不是 error：libuavs3e 的封装在 init/encode 两侧都打了进度日志，
+  # 万一再出现段错误（run#21 linux），至少能从日志看出死在 create 前还是 encode 里。
+  "$bin" -hide_banner -loglevel info -y \
     -f lavfi -i "testsrc2=size=320x240:rate=25:duration=1" \
     -c:v libuavs3e -qp 32 "$tmp/t.avs3" \
     || die "冒烟失败：libuavs3e 编码报错"
