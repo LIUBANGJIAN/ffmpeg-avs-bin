@@ -99,23 +99,12 @@ build_davs2() {
   # 版本串未必达得到（它长期没更新 version 宏）。库能力是够的，只改声明。
   pc_ensure_version davs2 1.6.0
 
-  # 立刻验符号，别等到 30 分钟后 FFmpeg 链接时才炸（那时错误还被折叠成
-  # "not found using pkg-config"，根本看不出是缺符号）。
-  case "${TARGET_ARCH:-x86_64}" in
-    x86_64|i386|i486|i586|i686|x86)
-      if command -v nm >/dev/null 2>&1; then
-        local _libdavs2="$PREFIX/lib/libdavs2.a"
-        nm -g --defined-only "$_libdavs2" 2>/dev/null \
-          | grep -q "davs2_alf_filter_block_sse128_10bit" \
-          || die "libdavs2.a 里没有 10bit ALF 的 SSE4 实现 —— 10bit 解码的 ALF 会缺符号"
-        if nm -g --undefined-only "$_libdavs2" 2>/dev/null \
-             | grep -q "davs2_alf_filter_block_avx2_10bit"; then
-          die "libdavs2.a 仍对 davs2_alf_filter_block_avx2_10bit 有未定义引用（alf.cc 的 AVX2 分支没摘掉？）"
-        fi
-        ok "libdavs2.a: 10bit ALF 走 SSE4，且无 AVX2 未定义引用"
-      fi
-      ;;
-  esac
+  # 这里不再用 nm 断言「符号在不在」——试过，信噪比太差：
+  # 它对含 nasm 汇编成员的归档给出的结果不稳定，run#15 就报了个假阴性
+  # （说没有 davs2_alf_filter_block_sse128_10bit，实际库是好的）。
+  # 真正的把关交给 build_everything 里的 probe_avs_pc_links：
+  # 它用和 FFmpeg 完全一样的参数真编真链一次，缺任何符号都会立刻暴露，
+  # 而且报的是链接器的原始错误，不是一句 "not found using pkg-config"。
 }
 
 # ------------------------------------------------------------------------------
