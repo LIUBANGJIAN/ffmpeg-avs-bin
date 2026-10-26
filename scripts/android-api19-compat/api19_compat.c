@@ -288,3 +288,208 @@ struct api19_lconv *localeconv(void)
     lc.int_n_sign_posn = 127;
     return &lc;
 }
+
+/* ==========================================================================
+ * 5) locale 对象三件套 + 宽→窄转换
+ *    补完第 3 节那 9 个符号之后，run#23 的链接测试又报出这一批：
+ *      ld: error: undefined symbol: uselocale / newlocale / freelocale
+ *      >>> referenced by __locale:54
+ *      >>>    locale.o:(__libcpp_sscanf_l / __libcpp_snprintf_l / ...)
+ *      ld: error: undefined symbol: wcsnrtombs
+ *    它们在 bionic 里同样是 API 21 才有的。libc++ 的用法是
+ *    `locale_t old = uselocale(l); ...; uselocale(old);` ——
+ *    我们只需要「能存能还」，不需要真的切换 LC_*。
+ * ========================================================================== */
+static int api19_dummy_locale; /* 只当令牌用，绝不按 struct 解引用 */
+
+void *newlocale(int category_mask, const char *name, void *base)
+{
+    (void)category_mask;
+    (void)name;
+    (void)base;
+    return (void *)&api19_dummy_locale;
+}
+
+void freelocale(void *loc)
+{
+    (void)loc;
+}
+
+void *uselocale(void *loc)
+{
+    static void *current;
+    void *prev = current;
+
+    if (loc != 0) { /* 传 0 表示「只查询」，不改 */
+        current = loc;
+    }
+    return prev;
+}
+
+/* 宽字符 → UTF-8 */
+static int wc_to_utf8(unsigned int cp, unsigned char *buf)
+{
+    if (cp < 0x80) {
+        buf[0] = (unsigned char)cp;
+        return 1;
+    } else if (cp < 0x800) {
+        buf[0] = (unsigned char)(0xc0 | (cp >> 6));
+        buf[1] = (unsigned char)(0x80 | (cp & 0x3f));
+        return 2;
+    } else if (cp < 0x10000) {
+        buf[0] = (unsigned char)(0xe0 | (cp >> 12));
+        buf[1] = (unsigned char)(0x80 | ((cp >> 6) & 0x3f));
+        buf[2] = (unsigned char)(0x80 | (cp & 0x3f));
+        return 3;
+    }
+    buf[0] = (unsigned char)(0xf0 | (cp >> 18));
+    buf[1] = (unsigned char)(0x80 | ((cp >> 12) & 0x3f));
+    buf[2] = (unsigned char)(0x80 | ((cp >> 6) & 0x3f));
+    buf[3] = (unsigned char)(0x80 | (cp & 0x3f));
+    return 4;
+}
+
+usize_t wcsnrtombs(char *dst, const wc_t **src, usize_t nwc, usize_t len, void *ps)
+{
+    const wc_t *s;
+    usize_t count = 0;
+
+    (void)ps;
+    if (!src || !*src) {
+        return 0;
+    }
+    s = *src;
+    while (nwc > 0) {
+        unsigned char buf[4];
+        int n, i;
+
+        if (s[0] == 0) {
+            if (dst == 0) {
+                break;
+            }
+            if (count < len) {
+                dst[count] = '\0';
+                *src = 0; /* 按 POSIX：写了结尾 NUL，*src 置 NULL */
+                return count;
+            }
+            break;
+        }
+        n = wc_to_utf8((unsigned int)s[0], buf);
+        if (dst != 0 && count + (usize_t)n > len) {
+            break;
+        }
+        if (dst) {
+            for (i = 0; i < n; i++) {
+                dst[count + (usize_t)i] = (char)buf[i];
+            }
+        }
+        count += (usize_t)n;
+        s++;
+        nwc--;
+    }
+    *src = s;
+    return count;
+}
+
+usize_t wcsrtombs(char *dst, const wc_t **src, usize_t len, void *ps)
+{
+    /* 与 wcsnrtombs 等价，只是没有宽字符数上限 */
+    return wcsnrtombs(dst, src, (usize_t)-1, len, ps);
+}
+
+/* 顺手补上同一批 BSD fallback 会用到的窄→宽/宽→窄单字符版本。
+   它们同样只在「符号真的缺」时才会被链接器从归档里取出来。 */
+usize_t mbrtowc(wc_t *pwc, const char *s, usize_t n, void *ps)
+{
+    int r;
+
+    (void)ps;
+    if (s == 0) {
+        return 0; /* 复位状态 */
+    }
+    r = mbtowc(pwc, s, n);
+    if (r < 0) {
+        /* 区分「非法序列」和「字节不够」：看首个字节声明的长度 */
+        if (n > 0) {
+            unsigned char c = (unsigned char)s[0];
+            int need = 1;
+
+            if ((c & 0xe0) == 0xc0) {
+                need = 2;
+            } else if ((c & 0xf0) == 0xe0) {
+                need = 3;
+            } else if ((c & 0xf8) == 0xf0) {
+                need = 4;
+            }
+            if (need > 1 && (usize_t)need > n) {
+                return (usize_t)-2;
+            }
+        }
+        return (usize_t)-1;
+    }
+    return (usize_t)r;
+}
+
+usize_t wcrtomb(char *s, wc_t wc, void *ps)
+{
+    unsigned char buf[4];
+    int n, i;
+
+    (void)ps;
+    if (s == 0) {
+        return 1; /* 传 NULL 只做状态查询 */
+    }
+    n = wc_to_utf8((unsigned int)(wc & 0x7fffffff), buf);
+    for (i = 0; i < n; i++) {
+        s[i] = (char)buf[i];
+    }
+    return (usize_t)n;
+}
+
+usize_t mbsrtowcs(wc_t *dst, const char **src, usize_t len, void *ps)
+{
+    const char *s;
+    usize_t count = 0;
+
+    (void)ps;
+    if (!src || !*src) {
+        return 0;
+    }
+    s = *src;
+    for (;;) {
+        int cp = 0;
+        usize_t n;
+
+        if (dst != 0 && count >= len) {
+            break;
+        }
+        n = mbrtowc(dst ? &cp : 0, s, 4, 0);
+        if (n == (usize_t)-1) {
+            *src = s;
+            return (usize_t)-1;
+        }
+        if (n == (usize_t)-2) {
+            break;
+        }
+        if (n == 0) {
+            if (dst) {
+                dst[count] = 0;
+            }
+            *src = 0;
+            return count;
+        }
+        if (dst) {
+            dst[count] = cp;
+        }
+        count++;
+        s += n;
+    }
+    *src = s;
+    return count;
+}
+
+int mbsinit(const void *ps)
+{
+    (void)ps;
+    return 1; /* 本实现无状态 */
+}
