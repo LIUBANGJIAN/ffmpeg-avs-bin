@@ -112,14 +112,18 @@ smoke_test() {
   local caps
   caps="$("$bin" -hide_banner -codecs 2>/dev/null)"
 
-  # avs2 必须是 D 和 E（解码 + 编码），且都来自外挂库
-  echo "$caps" | grep -E '^ DEV\.L\. avs2' | grep -q 'libdavs2' \
+  # 这里**绝不能**锚定 `D.V.L.` 这类标志位列。一旦 avs3 有了编码器，
+  # 同一行的标志就会从 `D.V.L.`（只有解码）变成 `DEV.L.`（解+编），
+  # 锚死列宽会把「明明四个库全都在」的构建误判成失败 —— run#19 的 windows
+  # 就是这么挂的（linux 那次同轮全绿）。要证明的只有一件事：
+  # avs2 / avs3 这两行里分别出现了 libdavs2、libxavs2、libuavs3d、libuavs3e。
+  echo "$caps" | grep -E '[[:space:]]avs2[[:space:]]' | grep -q 'libdavs2' \
     || die "冒烟失败：avs2 解码未链接 libdavs2"
-  echo "$caps" | grep -E '^ DEV\.L\. avs2' | grep -q 'libxavs2' \
+  echo "$caps" | grep -E '[[:space:]]avs2[[:space:]]' | grep -q 'libxavs2' \
     || die "冒烟失败：avs2 编码未链接 libxavs2"
-  echo "$caps" | grep -E '^ D\.V\.L\. avs3' | grep -q 'libuavs3d' \
+  echo "$caps" | grep -E '[[:space:]]avs3[[:space:]]' | grep -q 'libuavs3d' \
     || die "冒烟失败：avs3 解码未链接 libuavs3d"
-  echo "$caps" | grep -E '^ DEV\.L\. avs3' | grep -q 'libuavs3e' \
+  echo "$caps" | grep -E '[[:space:]]avs3[[:space:]]' | grep -q 'libuavs3e' \
     || die "冒烟失败：avs3 编码未链接 libuavs3e（补丁没生效？）"
 
   ok "AVS2/AVS3 编解码器全部就位"

@@ -374,16 +374,36 @@ EOF
 # ------------------------------------------------------------------
 fix_android_pc_files() {
   [ "${TARGET_OS:-}" = "android" ] || return 0
-  local pc n=0
+  local pc n=0 hit
   for pc in "$PREFIX"/lib/pkgconfig/*.pc; do
     [ -f "$pc" ] || continue
+    hit=0
     if grep -q -- '-lpthread\|-ldl' "$pc"; then
       sed -i -E 's/[[:space:]]*-lpthread//g; s/[[:space:]]*-ldl//g' "$pc"
-      n=$((n + 1))
+      hit=1
     fi
+    # x265 的 .pc 不是手写的，而是 CMake 拿 CMAKE_CXX_IMPLICIT_LINK_LIBRARIES
+    # 一项一项拼出来的（x265 3.4 source/CMakeLists.txt:696
+    #   list(APPEND PLIBLIST "-l${LIB}")），而 NDK 的 clang 驱动把这个
+    # `-l:libunwind.a` 原样塞进了那个列表 → 拼出 `-l-l:libunwind.a`。
+    # GNU ld 只把它当「找名为 lib-l:libunwind.a 的库」，直接报
+    #   ld: error: unable to find library -l-l:libunwind.a
+    # 而 configure 会折叠成一句 `ERROR: x265 not found using pkg-config`，
+    # 完全看不出真因（run#19 android-arm64/armv7 都是这么挂的）。
+    # libunwind 本来就由 clang 驱动自动链接（正因为它出现在 implicit link
+    # libs 里），所以整条删掉最安全；先删重复的，再删单份的。
+    if grep -q -- '-l-l:libunwind' "$pc"; then
+      sed -i -E 's/[[:space:]]*-l-l:libunwind\.a//g' "$pc"
+      hit=1
+    fi
+    if grep -q -- '-l:libunwind' "$pc"; then
+      sed -i -E 's/[[:space:]]*-l:libunwind\.a//g' "$pc"
+      hit=1
+    fi
+    if [ "$hit" = "1" ]; then n=$((n + 1)); fi
   done
   if [ "$n" -gt 0 ]; then
-    ok "android: 已从 $n 个 .pc 里摘掉 -lpthread/-ldl（bionic 里它们在 libc）"
+    ok "android: 已清理 $n 个 .pc 里的 -lpthread/-ldl/-l:libunwind.a（bionic 里前两者在 libc，unwind 由驱动自带）"
   fi
   return 0
 }

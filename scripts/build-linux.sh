@@ -63,13 +63,19 @@ export EXTRA_LDFLAGS="-L$PREFIX/lib"
 # ---------------- 干活 ----------------
 build_everything
 
-# 静态性必须验证：ldd 说 "not a dynamic executable" 才算过
+# 静态性必须验证。**不能用 ldd 的退出码，也不能只匹配 "not a dynamic"**：
+# musl 的 ldd 对完全静态的程序打印的是
+#   /lib/ld-musl-x86_64.so.1: /.../ffmpeg: Not a valid dynamic program
+# 并以非 0 退出、还带一行 stderr —— 这恰恰是「静态成功」的证据，却被
+# run#19 的旧判断当成了失败（构建其实 100% 成功，四条 AVS 断言全过）。
+# 换成 readelf 直接查 .dynamic 段里有没有 NEEDED，这是确定性的。
 log "校验静态链接"
-if ldd "$PREFIX/bin/ffmpeg" 2>&1 | grep -qi 'not a dynamic\|statically linked'; then
-  ok "ffmpeg 是纯静态二进制"
+_needed=$(readelf -d "$PREFIX/bin/ffmpeg" 2>/dev/null | grep -c '(NEEDED)' || true)
+if [ "${_needed:-0}" -eq 0 ]; then
+  ok "ffmpeg 是纯静态二进制（readelf：无 NEEDED 项）"
 else
-  ldd "$PREFIX/bin/ffmpeg" >&2 || true
-  die "ffmpeg 仍然依赖动态库 —— musl 静态链接没生效"
+  readelf -d "$PREFIX/bin/ffmpeg" 2>/dev/null | grep '(NEEDED)' >&2 || true
+  die "ffmpeg 仍然依赖 $_needed 个动态库 —— musl 静态链接没生效"
 fi
 
 smoke_test
