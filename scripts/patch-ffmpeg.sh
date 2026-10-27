@@ -78,48 +78,109 @@ extern const FFCodec ff_libuavs3e_encoder;'
   cp -f "$src" "$dir/libavcodec/libuavs3e.c"
   ok "已放入 libavcodec/libuavs3e.c"
 
-  # ---- ⑧ libavcodec/libuavs3d.c：摘掉对 uavs3d 1.2+ 才有的色彩字段的引用 ----
+  # ---- ⑧ libavcodec/libuavs3d.c：不需要再打补丁了 ----
   #
-  # FFmpeg 6.1 自带的 libuavs3d.c 会读 seqh->colour_description /
-  # colour_primaries / transfer_characteristics / matrix_coefficients，
-  # 而 uavs3d **v1.1** 的 uavs3d_com_seqh_t 里根本没有这四个成员
-  # （parser.c 读出来就直接丢了）。于是 make 阶段报：
-  #   libavcodec/libuavs3d.c:231:25: error: 'struct uavs3d_com_seqh_t'
-  #       has no member named 'colour_description'      （run#18 linux）
-  #
-  # 为什么不去升级 uavs3d 到 1.2：
-  #   1.2 确实有这四个字段，但它的 CMakeLists 改成按 Uavs3d_TARGET_CPU 分支，
-  #   armv7 一支会强行 enable_language(ASM) 并加 `-mfloat-abi=hard`
-  #   （NDK 用的是 softfp），还得编一堆 .S —— 等于把我们已经调通的
-  #   "Android 只走纯 C" 结论整个推翻重来。
-  #
-  # 代价：解码 AVS3 时不再把色彩信息写进 AVCodecContext。
-  # 需要时用 -color_primaries / -color_trc / -colorspace 手动指定即可。
-  # 这段用整块文本锚点（17 行），锚点漂移会立刻失败，不会静默。
-  edit_exact "$dir/libavcodec/libuavs3d.c" \
-'                if (seqh->colour_description) {
-                    if (UAVS3D_CHECK_INVALID_RANGE(seqh->colour_primaries, 0, 9) ||
-                        UAVS3D_CHECK_INVALID_RANGE(seqh->transfer_characteristics, 0, 14) ||
-                        UAVS3D_CHECK_INVALID_RANGE(seqh->matrix_coefficients, 0, 11)) {
-                        av_log(avctx, AV_LOG_ERROR,
-                               "Invalid colour description: primaries: %d"
-                               "transfer characteristics: %d"
-                               "matrix coefficients: %d.\n",
-                               seqh->colour_primaries,
-                               seqh->transfer_characteristics,
-                               seqh->matrix_coefficients);
-                    } else {
-                        avctx->color_primaries = ff_avs3_color_primaries_tab[seqh->colour_primaries];
-                        avctx->color_trc       = ff_avs3_color_transfer_tab [seqh->transfer_characteristics];
-                        avctx->colorspace      = ff_avs3_color_matrix_tab   [seqh->matrix_coefficients];
-                    }
-                }' \
-'                /* 这里原本是一段把 seqh->colour_description / colour_primaries /
-                 * transfer_characteristics / matrix_coefficients 搬到
-                 * AVCodecContext 的代码。我们用 uavs3d v1.1，它的
-                 * uavs3d_com_seqh_t 还没有这四个成员（上游 1.2 才加），
-                 * 所以整块摘掉（原因见 scripts/patch-ffmpeg.sh）。
-                 * 需要时用 -color_primaries / -color_trc / -colorspace 手动指定。 */'
+  # 曾经这里有一块「把 seqh->colour_description 那 17 行搬运逻辑摘掉」的补丁，
+  # 因为 uavs3d v1.1 的 uavs3d_com_seqh_t 里没有这四个成员（run#18）。
+  # 现在 scripts/libs/avs.sh 的 patch_uavs3d_colour() 给 v1.1 补上了同名同序
+  # 的四个字段，FFmpeg 自带的这段搬运逻辑可以原样保留 —— AVS3 的色彩信息
+  # 就自动进 AVCodecContext 了。这里只剩一个锚点存在性检查，防止上游改动。
+  grep -q 'ff_avs3_color_primaries_tab\[seqh->colour_primaries\]' "$dir/libavcodec/libuavs3d.c" \
+    || die "libuavs3d.c 里找不到色彩搬运逻辑（上游改了），需要重新核对 ⑧"
 
-  ok "FFmpeg AVS3 补丁应用完成（configure 4 处 + Makefile 1 处 + allcodecs 1 处 + libuavs3e.c 1 个文件 + libuavs3d.c 1 处）"
+  # ---- ⑨ libavcodec/libdavs2.c：把 AVS2 的色彩描述写进 AVCodecContext ----
+  #
+  # davs2 只把序列信息（宽高/位深/帧率）交出来，原本没有色彩字段；
+  # scripts/libs/avs.sh 的 patch_davs2_colour() 让它在 davs2_seq_info_t 末尾
+  # 多带 6 个字段。这里把它们映射成 AVCOL_* 常量。
+  #
+  # 三张表与 libavcodec/avs3.h 里的 ff_avs3_color_*_tab 完全一致 —— AVS2 与
+  # AVS3 的 colour_primaries / transfer_characteristics / matrix_coefficients
+  # 取值表是同一套（这也是有据可查的：AVS2 HDR10 用 9/12/8，HLG 用 9/14/8，
+  # 而 12 在表里是 SMPTE2084(PQ)、14 是 ARIB_STD_B67(HLG)）。为了不让
+  # libdavs2.c 依赖 avs3.h，这里各写一份带 AVS2 命名的静态表。
+  edit_exact "$dir/libavcodec/libdavs2.c" \
+'typedef struct DAVS2Context {' \
+'/* AVS2 的 colour_primaries / transfer_characteristics / matrix_coefficients
+ * 取值表，与 AVS3 共用同一套编号（见 libavcodec/avs3.h）。 */
+static const int davs2_color_primaries_tab[10] = {
+    AVCOL_PRI_RESERVED0   ,    /* 0 */
+    AVCOL_PRI_BT709       ,    /* 1 */
+    AVCOL_PRI_UNSPECIFIED ,    /* 2 */
+    AVCOL_PRI_RESERVED    ,    /* 3 */
+    AVCOL_PRI_BT470M      ,    /* 4 */
+    AVCOL_PRI_BT470BG     ,    /* 5 */
+    AVCOL_PRI_SMPTE170M   ,    /* 6 */
+    AVCOL_PRI_SMPTE240M   ,    /* 7 */
+    AVCOL_PRI_FILM        ,    /* 8 */
+    AVCOL_PRI_BT2020           /* 9 */
+};
+
+static const int davs2_color_transfer_tab[15] = {
+    AVCOL_TRC_RESERVED0    ,   /* 0 */
+    AVCOL_TRC_BT709        ,   /* 1 */
+    AVCOL_TRC_UNSPECIFIED  ,   /* 2 */
+    AVCOL_TRC_RESERVED     ,   /* 3 */
+    AVCOL_TRC_GAMMA22      ,   /* 4 */
+    AVCOL_TRC_GAMMA28      ,   /* 5 */
+    AVCOL_TRC_SMPTE170M    ,   /* 6 */
+    AVCOL_TRC_SMPTE240M    ,   /* 7 */
+    AVCOL_TRC_LINEAR       ,   /* 8 */
+    AVCOL_TRC_LOG          ,   /* 9 */
+    AVCOL_TRC_LOG_SQRT     ,   /* 10 */
+    AVCOL_TRC_BT2020_12    ,   /* 11 */
+    AVCOL_TRC_SMPTE2084    ,   /* 12: HDR10 (PQ) */
+    AVCOL_TRC_UNSPECIFIED  ,   /* 13 */
+    AVCOL_TRC_ARIB_STD_B67     /* 14: HLG */
+};
+
+static const int davs2_color_matrix_tab[12] = {
+    AVCOL_SPC_RESERVED     ,   /* 0 */
+    AVCOL_SPC_BT709        ,   /* 1 */
+    AVCOL_SPC_UNSPECIFIED  ,   /* 2 */
+    AVCOL_SPC_RESERVED     ,   /* 3 */
+    AVCOL_SPC_FCC          ,   /* 4 */
+    AVCOL_SPC_BT470BG      ,   /* 5 */
+    AVCOL_SPC_SMPTE170M    ,   /* 6 */
+    AVCOL_SPC_SMPTE240M    ,   /* 7 */
+    AVCOL_SPC_BT2020_NCL   ,   /* 8 */
+    AVCOL_SPC_BT2020_CL    ,   /* 9 */
+    AVCOL_SPC_UNSPECIFIED  ,   /* 10 */
+    AVCOL_SPC_UNSPECIFIED      /* 11 */
+};
+
+typedef struct DAVS2Context {'
+
+  edit_exact "$dir/libavcodec/libdavs2.c" \
+'        if (headerset->frame_rate_id < 16)
+            avctx->framerate = ff_avs2_frame_rate_tab[headerset->frame_rate_id];
+        *got_frame = 0;' \
+'        if (headerset->frame_rate_id < 16)
+            avctx->framerate = ff_avs2_frame_rate_tab[headerset->frame_rate_id];
+
+        /* 色彩描述来自序列显示扩展（0xB5, id=2），davs2 原本整段跳过、
+         * 我们打的补丁把它读了出来（见 scripts/libs/avs.sh）。
+         * 没有 colour_description 时三个值都保持 unknown，与以前一致。 */
+        if (headerset->colour_description) {
+            /* 上界就是三张表的长度：primaries 0..9（10 项）、
+             * transfer 0..14（15 项）、matrix 0..11（12 项） */
+            if (headerset->colour_primaries         < 10 &&
+                headerset->transfer_characteristics < 15 &&
+                headerset->matrix_coefficients      < 12) {
+                avctx->color_primaries = davs2_color_primaries_tab[headerset->colour_primaries];
+                avctx->color_trc       = davs2_color_transfer_tab [headerset->transfer_characteristics];
+                avctx->colorspace      = davs2_color_matrix_tab   [headerset->matrix_coefficients];
+            } else {
+                av_log(avctx, AV_LOG_WARNING,
+                       "Invalid colour description: primaries: %d"
+                       " transfer characteristics: %d"
+                       " matrix coefficients: %d.\n",
+                       (int)headerset->colour_primaries,
+                       (int)headerset->transfer_characteristics,
+                       (int)headerset->matrix_coefficients);
+            }
+        }
+        *got_frame = 0;'
+
+  ok "FFmpeg AVS 补丁应用完成（configure 4 处 + Makefile 1 处 + allcodecs 1 处 + libuavs3e.c 1 个文件 + libdavs2.c 色彩 2 处）"
 }

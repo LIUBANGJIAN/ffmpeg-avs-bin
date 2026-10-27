@@ -11,6 +11,189 @@
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
+# davs2 —— 把「序列显示扩展」里的色彩描述读出来（上游从来没读过）
+#
+# 背景：AVS2 的序列头（0xB0）**没有** colour_description 这类语法，色彩/HDR
+# 描述被放在序列显示扩展里（0xB5，extension_start_code_identifier == 2）：
+#
+#     sequence_display_extension() {
+#         extension_start_code_identifier   u(4)   // == 2
+#         video_format                      u(3)
+#         sample_range                      u(1)
+#         colour_description                u(1)
+#         if (colour_description) {
+#             colour_primaries              u(8)
+#             transfer_characteristics      u(8)
+#             matrix_coefficients           u(8)
+#         }
+#         display_horizontal_size          u(14)
+#         ...
+#     }
+#
+# 但 davs2 的 parse_header() 里 SC_EXTENSION 走的是 `/* skip this unit */`，
+# 于是这些字段从来没有进过 davs2_seq_info_t，FFmpeg 的 libdavs2.c 也就没有
+# 任何东西可写进 AVCodecContext —— 结果 ffprobe 对**所有** AVS2 流一律报
+# color_space/primaries/transfer = unknown。
+#
+# 实测这条组播（SZTV-4K-AVS2）序列显示扩展里是
+#     colour_description=1  primaries=9  transfer=14  matrix=8
+# 即 BT.2020 + HLG（9=BT.2020，14=HLG，8=BT.2020_NCL；与 FFmpeg avs3.h 的
+# ff_avs3_color_transfer_tab[14]=AVCOL_TRC_ARIB_STD_B67 一致，也与
+# 《IPTV 集成播控平台 4K 超高清节目视音频格式要求》B.2.2 的 AVS2 HLG 表一致：
+# primaries=9 / transfer=14 / matrix=8；同文档 B.2.1 的 HDR10 是 9/12/8，
+# 12 在 AVS3 表里正是 AVCOL_TRC_SMPTE2084）。也就是说这条流本来就是 HDR，
+# 只是解码链路把信令丢了，播放器按 BT.709 SDR 去解释。
+#
+# 改动分四处，都不改解码行为，只把已有的数据搬出来：
+#   ① davs2.h  : davs2_seq_info_t 追加 6 个字段（公开结构，追加在末尾）
+#   ② common.h : davs2_mgr_t 追加同样的字段（序列信息会随新序列头被 memcpy
+#                覆盖成 0，而扩展段在序列头之后才到，必须独立存一份）
+#   ③ header.cc: parse_header() 里识别 id==2 的扩展并解析
+#   ④ davs2.cc : 输出序列信息时把色彩字段补进 headerset
+# ------------------------------------------------------------------------------
+patch_davs2_colour() {
+  local dir="$1"
+
+  # ① 公开结构追加字段（末尾追加，不影响已有成员的偏移）
+  edit_crlf "$dir/source/davs2.h" \
+'    uint32_t        frame_rate_id;      /* frame rate code, mpeg12 [1...8] */
+} davs2_seq_info_t;' \
+'    uint32_t        frame_rate_id;      /* frame rate code, mpeg12 [1...8] */
+
+    /* --- colour description, from sequence display extension (0xB5, id=2) --- */
+    uint32_t        colour_description;      /* 1: the following three are valid */
+    uint32_t        colour_primaries;        /* 9: BT.2020                     */
+    uint32_t        transfer_characteristics;/* 12: PQ, 14: HLG                */
+    uint32_t        matrix_coefficients;     /* 8: BT.2020 non-constant        */
+    uint32_t        video_format;            /* 1: progressive                 */
+    uint32_t        sample_range;            /* 0: limited range               */
+} davs2_seq_info_t;'
+
+  # ② 解码器管理器里独立保存一份（见上面②的说明）
+  edit_crlf "$dir/source/common/common.h" \
+'    davs2_seq_t         seq_info;     /* latest sequence head */' \
+'    davs2_seq_t         seq_info;     /* latest sequence head */
+
+    /* --- colour description, parsed from sequence display extension(0xB5, id=2).
+     * 序列信息会在每个新序列头处被整体 memcpy 覆盖成 0，而扩展段在序列头
+     * 之后才到，所以必须单独存，不能只放在 seq_info.head 里。 --- */
+    uint32_t            colour_description;
+    uint32_t            colour_primaries;
+    uint32_t            transfer_characteristics;
+    uint32_t            matrix_coefficients;
+    uint32_t            video_format;
+    uint32_t            sample_range;'
+
+  # ③ 解析函数：放在 parse_header() 之前（u_v / u_flag 来自 vlc.h，已包含）
+  edit_crlf "$dir/source/common/header.cc" \
+' */
+int parse_header(davs2_t *h, davs2_bs_t *p_bs)' \
+' */
+
+/* ---------------------------------------------------------------------------
+ * 序列显示扩展（0xB5，extension_start_code_identifier == 2）
+ *
+ * 只在 bs 的**副本**上读，不动 bs->i_bit_pos：整段的跳过仍由 parse_header()
+ * 统一处理，解码流程一行都不变。只在值是 id==2 时才写 manager，其它扩展
+ * （3=时序分级 / 4=版权 / 7=图像显示 / 11=摄像机参数 / 15=定位数据）忽略。
+ * --------------------------------------------------------------------------- */
+static void parse_sequence_display_extension(davs2_mgr_t *mgr, davs2_bs_t *bs)
+{
+    davs2_bs_t tmp = *bs;
+    int video_format, sample_range, colour_description;
+    int primaries, transfer, matrix;
+
+    /* 进入这里时 i_bit_pos 指向起始码的**第一个 0x00**（parse_header 是在
+     * 找到 start code 之后直接换算成位偏移的），所以先跳过 32 bit 起始码，
+     * 位置才对得上 extension_start_code_identifier。 */
+    tmp.i_bit_pos += 32;
+
+    if (u_v(&tmp, 4, "extension_start_code_identifier") != SEQUENCE_DISPLAY_EXTENSION_ID) {
+        return;
+    }
+
+    /* bool_t 是 uint8_t，而 vlc_u_v 越界返回 -1 —— 直接赋值会变成 255，
+     * 所以标志位一律用 == 1 归一化。 */
+    video_format       = u_v(&tmp, 3, "video_format");
+    sample_range       = (u_flag(&tmp, "sample_range") == 1) ? 1 : 0;
+    colour_description = (u_flag(&tmp, "colour_description") == 1) ? 1 : 0;
+
+    if (colour_description) {
+        /* vlc_u_v 越界时返回 -1 且不移动指针 —— 三个值必须全部有效才写回，
+         * 否则被截断的扩展段会留下一组垃圾色彩，比 unknown 更糟。 */
+        primaries = u_v(&tmp, 8, "colour_primaries");
+        transfer  = u_v(&tmp, 8, "transfer_characteristics");
+        matrix    = u_v(&tmp, 8, "matrix_coefficients");
+
+        if (primaries < 0 || transfer < 0 || matrix < 0) {
+            return;
+        }
+
+        mgr->colour_primaries         = (uint32_t)primaries;
+        mgr->transfer_characteristics = (uint32_t)transfer;
+        mgr->matrix_coefficients      = (uint32_t)matrix;
+        mgr->colour_description       = 1;
+    } else {
+        mgr->colour_description = 0;
+    }
+
+    if (video_format >= 0 && video_format <= 7) {
+        mgr->video_format = (uint32_t)video_format;
+    }
+    mgr->sample_range = (uint32_t)sample_range;
+}
+
+/* ---------------------------------------------------------------------------
+ */
+int parse_header(davs2_t *h, davs2_bs_t *p_bs)'
+
+  # ③b 在 switch 里调用（case 标签后面接一条语句是合法的 C++，
+  #     执行完自然 fall through 到下面的「跳过本单元」分支）
+  edit_crlf "$dir/source/common/header.cc" \
+'        case SC_EXTENSION:' \
+'        case SC_EXTENSION:
+            /* AVS2 的色彩描述就藏在这里，上游一直整段跳过 */
+            parse_sequence_display_extension(h->task_info.taskmgr, p_bs);'
+
+  # ③c 新序列头到来时把色彩描述清零：扩展段在序列头之后才到，会重新填；
+  #     若这个新序列根本没有序列显示扩展，就应当回到 unknown 而不是沿用旧的。
+  edit_crlf "$dir/source/common/header.cc" \
+'        memcpy(&mgr->seq_info, seq, sizeof(davs2_seq_t));' \
+'        memcpy(&mgr->seq_info, seq, sizeof(davs2_seq_t));
+
+        /* 新序列：色彩描述先归零，等紧随其后的序列显示扩展重新填 */
+        mgr->colour_description = 0;'
+
+  # ④ 输出时补进 headerset（两处 GOT_HEADER 分支都要，want=2）
+  edit_crlf "$dir/source/common/davs2.cc" \
+'/* --------------------------------------------------------------------------
+ * Thread of decoder output (decoded raw data)
+ */
+int decoder_get_output(davs2_mgr_t *mgr, davs2_seq_info_t *headerset, davs2_picture_t *out_frame, int is_flush)' \
+'/* 把序列显示扩展里读到的色彩描述补进对外输出的序列信息。
+ * 必须放在 memcpy 之后：memcpy 拷的是 mgr->seq_info.head，那份里没有色彩。 */
+static void davs2_fill_colour_info(davs2_seq_info_t *headerset, davs2_mgr_t *mgr)
+{
+    headerset->colour_description       = mgr->colour_description;
+    headerset->colour_primaries         = mgr->colour_primaries;
+    headerset->transfer_characteristics = mgr->transfer_characteristics;
+    headerset->matrix_coefficients      = mgr->matrix_coefficients;
+    headerset->video_format             = mgr->video_format;
+    headerset->sample_range             = mgr->sample_range;
+}
+
+/* --------------------------------------------------------------------------
+ * Thread of decoder output (decoded raw data)
+ */
+int decoder_get_output(davs2_mgr_t *mgr, davs2_seq_info_t *headerset, davs2_picture_t *out_frame, int is_flush)'
+
+  edit_crlf "$dir/source/common/davs2.cc" \
+'            memcpy(headerset, &mgr->seq_info.head, sizeof(davs2_seq_info_t));' \
+'            memcpy(headerset, &mgr->seq_info.head, sizeof(davs2_seq_info_t));
+            davs2_fill_colour_info(headerset, mgr);' 2
+}
+
+# ------------------------------------------------------------------------------
 # davs2 —— AVS2 解码
 # 四个坑（全部已踩过并核实）：
 #   1) 源码是 C++（.cc），configure 默认 CC=g++；交叉编译时必须把 CC 指到 C++ 编译器
@@ -62,6 +245,9 @@ build_davs2() {
   edit_exact "$dir/source/common/alf.cc" \
     '            fh->alf_block[0] = alf_filter_block_avx2_10bit;' \
     '            /* AVX2 版 10bit ALF 上游从未接入构建，保留上面的 SSE4 实现 */'
+
+  # 把序列显示扩展里的色彩描述读出来（详见 patch_davs2_colour 的注释）
+  patch_davs2_colour "$dir"
 
   local arch_opts=()
   case "${TARGET_ARCH:-x86_64}" in
@@ -182,6 +368,10 @@ build_xavs2() {
 #      所以 ARM 上关掉 NEON 汇编、走纯 C（C 实现是运行期位深的），
 #      代价是 ARM 解码慢 2~4 倍；x86 上 SSE/AVX2 完全不受影响。
 # ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# uavs3d —— AVS3 解码（10bit）
+# ------------------------------------------------------------------------------
 build_uavs3d() {
   local dir
   dir="$(fetch uavs3d)"
@@ -278,6 +468,36 @@ endif()'
         }
 #endif
     }'
+
+  # ------------------------------------------------------------------------
+  # stdout 污染：uavs3d 有 3 处直接 printf 到 stdout，完全绕过了 av_log。
+  # 这不只是"日志难看"，是会造成实际故障：
+  #   * `ffprobe -of json` 的输出里被插进
+  #       libuavs3d(10): 1.1.1_release, 4680032b9bd0034523cc00ec9dd7c95d5d565d1e
+  #     于是第 2 行就不是 JSON 了，任何解析器都会崩——
+  #     实测 8K 素材上 checkts.py 报
+  #       "Expecting property name enclosed in double quotes: line 2 column 1"
+  #   * 任何「结果走 stdout」的用法都会被彻底污染，例如
+  #       ffmpeg -i in.ts -f mpegts pipe:1 > out.ts
+  #     输出文件直接报废。
+  # 版本横幅是在 uavs3d_create() 里打的，每建一个解码器实例就打一次，
+  # 所以 ffprobe 探测一次会打两行（探流一个实例 + 正式一个实例）。
+  # 三处统一改到 stderr，与 davs2 的行为对齐。
+  # ------------------------------------------------------------------------
+  edit_exact "$dir/source/decoder/uavs3d.c" \
+    'printf("libuavs3d(%2d): %s_%s, %s\n", BIT_DEPTH, VERSION_STR, VERSION_TYPE, VERSION_SHA1);' \
+    'fprintf(stderr, "libuavs3d(%2d): %s_%s, %s\n", BIT_DEPTH, VERSION_STR, VERSION_TYPE, VERSION_SHA1);'
+
+  edit_exact "$dir/source/decoder/dec_util.c" \
+    'printf(" >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>  Warnning: enc/dec mismatch! ptr = %lld\n", (long long)pic->ptr);' \
+    'fprintf(stderr, " >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>  Warnning: enc/dec mismatch! ptr = %lld\n", (long long)pic->ptr);'
+
+  edit_exact "$dir/source/decore/intra_pred.c" \
+    'printf("\n illegal chroma intra prediction mode\n");' \
+    'fprintf(stderr, "\n illegal chroma intra prediction mode\n");'
+
+  # 把序列头里的色彩描述留下（详见文件末尾 patch_uavs3d_colour 的注释）
+  patch_uavs3d_colour "$dir"
 
   log "cmake build uavs3d (10bit)"
   # 只编库目标：test/uavs3dec 会 target_link_libraries(… pthread)，
@@ -447,6 +667,71 @@ endif()'
 
   require_pc uavs3e
 }
+# ------------------------------------------------------------------------------
+# uavs3d —— 把 AVS3 序列头里的色彩描述留下（v1.1 读了就扔）
+#
+# 关键事实：uavs3d v1.1 的 parser.c **本来就在读** colour_description 和后面
+# 三个 8 bit 字段，只是读完直接丢弃：
+#
+#     int colour_description = dec_bs_read1(bs, -1);   // colour_description u(1)
+#     if (colour_description) {
+#         dec_bs_read(bs, 8, 0, COM_UINT32_MAX);       // colour_primaries
+#         dec_bs_read(bs, 8, 0, COM_UINT32_MAX);       // transfer_characteristics
+#         dec_bs_read(bs, 8, 0, COM_UINT32_MAX);       // matrix_coefficients
+#     }
+#
+# 而 com_seqh_t 里没有对应成员可存 —— 这就是 FFmpeg 6.1 的 libuavs3d.c 引用
+# seqh->colour_description 时编不过的原因（run#18）。之前为了绕开这个编译错误，
+# 我们把 libuavs3d.c 里那段搬运逻辑整块摘掉了（代价：AVS3 永远报 unknown）。
+#
+# 正解不是升到 1.2 —— 1.2 的 CMakeLists 会按 Uavs3d_TARGET_CPU 分支，
+# armv7 那支强行 enable_language(ASM) 并加 -mfloat-abi=hard（NDK 是 softfp），
+# 等于把已经调通的「Android 纯 C」结论推翻重来。这里只做最小改动：
+#   · com_seqh_t 追加 4 个 unsigned char（与 1.2 同名同序，libuavs3d.c 无需改动）
+#   · sequence_display_extension() 多接一个 seqhdr 参数，把值存进去
+# 注意 colour_primaries 等必须是 u8 语义：libuavs3d.c 用
+# UAVS3D_CHECK_INVALID_RANGE(seqh->colour_primaries, 0, 9) 做范围校验。
+# ------------------------------------------------------------------------------
+patch_uavs3d_colour() {
+  local dir="$1"
+
+  edit_exact "$dir/source/decoder/uavs3d.h" \
+    '    unsigned char  position_based_transform_enable_flag;' \
+'    unsigned char  position_based_transform_enable_flag;
+
+    /* colour description, from sequence display extension (0xB5, id=2).
+     * 与上游 uavs3d 1.2 同名同序，FFmpeg 的 libuavs3d.c 直接读这几个成员。 */
+    unsigned char  colour_description;
+    unsigned char  colour_primaries;
+    unsigned char  transfer_characteristics;
+    unsigned char  matrix_coefficients;'
+
+  edit_exact "$dir/source/decoder/parser.c" \
+    'static int sequence_display_extension(com_bs_t * bs)' \
+    'static int sequence_display_extension(com_bs_t * bs, com_seqh_t * seqhdr)'
+
+  edit_exact "$dir/source/decoder/parser.c" \
+    '                sequence_display_extension(bs);' \
+    '                sequence_display_extension(bs, seqhdr);'
+
+  edit_exact "$dir/source/decoder/parser.c" \
+    '    int colour_description = dec_bs_read1(bs, -1);     // colour_description       u(1)' \
+'    int colour_description = dec_bs_read1(bs, -1);     // colour_description       u(1)
+    seqhdr->colour_description = (unsigned char)colour_description;'
+
+  edit_exact "$dir/source/decoder/parser.c" \
+    '        dec_bs_read(bs, 8, 0, COM_UINT32_MAX);         // colour_primaries         u(8)' \
+    '        seqhdr->colour_primaries = (unsigned char)dec_bs_read(bs, 8, 0, COM_UINT32_MAX);'
+
+  edit_exact "$dir/source/decoder/parser.c" \
+    '        dec_bs_read(bs, 8, 0, COM_UINT32_MAX);         // transfer_characteristics u(8)' \
+    '        seqhdr->transfer_characteristics = (unsigned char)dec_bs_read(bs, 8, 0, COM_UINT32_MAX);'
+
+  edit_exact "$dir/source/decoder/parser.c" \
+    '        dec_bs_read(bs, 8, 0, COM_UINT32_MAX);         // matrix_coefficients      u(8)' \
+    '        seqhdr->matrix_coefficients = (unsigned char)dec_bs_read(bs, 8, 0, COM_UINT32_MAX);'
+}
+
 
 # ------------------------------------------------------------------------------
 # 一次性构建全部 AVS 库

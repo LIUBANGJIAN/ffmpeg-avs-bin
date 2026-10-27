@@ -125,6 +125,31 @@ bionic 不能静态链（会丢 TLS/atfork，运行时随机崩，官方不支�
 
 **xavs2 永远只能 8bit。** 上游硬限制，不是配置问题。
 
+**AVS 的色彩/HDR 信令是补出来的。** 上游两条链路都把色彩信息丢了，本仓库把它接回来：
+
+- `davs2`：AVS2 的色彩描述（`colour_primaries` / `transfer_characteristics` /
+  `matrix_coefficients`）不在序列头里，而在**序列显示扩展**（`0xB5`，扩展 id = 2）。
+  上游 `parse_header()` 对 `SC_EXTENSION` 一律 `skip this unit`，所以这些值从来没被读过，
+  `ffprobe` 对任何 AVS2 流都报 `unknown`。本仓库补了一段解析，并把结果接到
+  `AVCodecContext`（见 `scripts/libs/avs.sh` 的 `patch_davs2_colour`）。
+- `uavs3d`：v1.1 的 `parser.c` **本来就在读** `colour_description`，但读完直接丢弃，
+  `com_seqh_t` 里没有成员可存，于是 FFmpeg 6.1 的 `libuavs3d.c` 编不过。本仓库给
+  `com_seqh_t` 补了同名同序的四个字段（不升 1.2，避免其 CMakeLists 的 armv7 分支
+  强制 `-mfloat-abi=hard` 打坏 Android softfp 构建）。
+
+实测效果（深圳卫视 4K 组播，AVS2 Main10）：
+
+```
+$ ffprobe -show_streams udp://230.177.0.28:3028?...
+color_primaries=bt2020  color_transfer=arib-std-b67  color_space=bt2020nc
+```
+
+即 **BT.2020 + HLG**。改动前这三个值全是 `unknown`，播放器只能按 BT.709/SDR 解释，
+画面会偏淡偏灰。
+
+**编码侧仍不写色彩。** `xavs2` 的序列显示扩展字段在上游是注释掉的，本仓库没有补，
+所以自编的 AVS2 流仍不带 colour_description。解码侧不受影响。
+
 **Android 不启用硬编解码。** `mediacodec` 需要 JVM 上下文，静态 CLI 里开了也跑不通。
 
 ---

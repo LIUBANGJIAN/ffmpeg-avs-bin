@@ -470,6 +470,42 @@ PY
 }
 
 # ------------------------------------------------------------------
+# 严格文本替换（自动适配 CRLF）
+#
+# edit_exact 要求锚点逐字节匹配，而 davs2 的源码是 **100% CRLF**：锚点里只要
+# 写一个 \n 就永远匹配不上（run#14 踩过）。手工在 shell 字符串里敲 \r 又极易
+# 出错、且看不出来。这里把锚点和替换文本都按文件自身的行尾风格归一化：
+#   文件里 CRLF 占多数  -> 锚点/替换里的 \n 全部换成 \r\n
+#   否则                -> 原样（LF）
+# 这样补丁脚本里所有锚点都可以按"人类习惯的 LF"来写。
+#
+# 用法： edit_crlf <文件> <旧串> <新串> [期望匹配次数=1]
+# ------------------------------------------------------------------
+edit_crlf() {
+  local file="$1" old="$2" new="$3" want="${4:-1}"
+  [ -f "$file" ] || die "edit_crlf: 文件不存在 $file"
+  python3 - "$file" "$old" "$new" "$want" <<'PY'
+import sys
+path, old, new, want = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+with open(path, 'r', encoding='utf-8', errors='surrogateescape', newline='') as f:
+    s = f.read()
+nl = '\r\n' if s.count('\r\n') * 2 > s.count('\n') else '\n'
+o = old.replace('\n', nl)
+w = new.replace('\n', nl)
+n = s.count(o)
+if n != want:
+    sys.stderr.write(
+        "\n[edit_crlf] 锚点匹配 %d 次，期望 %d 次（行尾=%s）\n  文件: %s\n  锚点: %r\n"
+        % (n, want, 'CRLF' if nl == '\r\n' else 'LF', path, o[:200])
+    )
+    sys.exit(1)
+with open(path, 'w', encoding='utf-8', errors='surrogateescape', newline='') as f:
+    f.write(s.replace(o, w))
+PY
+  ok "替换成功 ($(basename "$file"))"
+}
+
+# ------------------------------------------------------------------
 # 校验：确认某个库确实装进了 prefix（防止 --enable-xxx 静默失效）
 # ------------------------------------------------------------------
 require_pc() {
