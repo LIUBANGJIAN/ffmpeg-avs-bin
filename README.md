@@ -170,6 +170,8 @@ scripts/
                     fribidi / harfbuzz / libass / zimg / srt / sdl2
   build-windows.sh  build-linux.sh  build-android.sh
   verify-urls.sh    依赖地址可达性自检
+  etr290.py         流体检入口（抓流 + TSDuck analyze + 出报告）
+  etr290_report.py  analyze 的 JSON -> TR 101 290 判定
 patches/
   libuavs3e.c       AVS3 编码器封装（约 300 行）
 .github/workflows/
@@ -233,7 +235,52 @@ ANDROID_NDK_HOME=/opt/ndk-r25c ./scripts/build-android.sh arm64
 
 ---
 
-## 8. 已知限制
+## 8. 流体检工具：TR 101 290（ETR 290）
+
+`scripts/etr290.py` 一条命令做「抓流 → TSDuck `analyze` → TR 101 290 判定」：
+
+```bash
+# 实时组播抓 30 秒
+python scripts/etr290.py 230.177.0.28:3028 --local-address 10.222.132.199
+
+# 抓 60 秒，并把 analyze 的原始 JSON 留下来备查
+python scripts/etr290.py 230.177.0.28:3028 --seconds 60 --keep out.json
+
+# 现成录像离线体检（不联网）
+python scripts/etr290.py 录制.ts
+
+# 手上已经有 analyze JSON，只想出报告
+python scripts/etr290.py out.json
+```
+
+退出码：`0` 优先级 1/2 全过，`1` 有硬错，`2` 抓包/分析本身失败（会列原因清单）。
+依赖 TSDuck 的 `tsp`。Windows 装完默认在 `C:\tsduck\bin\tsp.exe`；找不到会自动搜
+PATH、`$TSDuck_HOME`、常见安装目录，也可以用 `--tsp` 指定。
+
+实测（深圳卫视 4K 组播，20 秒 / 505,337 包 / 38.00 Mbps CBR）：
+
+```
+  PID       角色           码率Mbps        包数   CC错误   重复包 PES非法
+  0x0077    视频             36.000     478,736        0        0       0
+  0x0078    音频              0.470       6,250        0        0       0
+  ...
+判定
+  CC 错误率         : 0.000000%（0 / 505,337）
+  [PASS] TR 101 290 优先级 1/2 全部通过
+```
+
+能覆盖哪些项、覆盖不了哪些项（`analyze` 拿不到 PCR 抖动精度 ±500 ns 和部分描述符
+语法检查，那两项要专用分析仪），都写在 `scripts/etr290_report.py` 开头的文档注释里。
+
+> 两个实现细节值得记一笔：`-P until --seconds N` 只在有数据流过时才计时，
+> 所以组播没流的时候 `tsp` 会永远阻塞在 recv 上 —— 脚本外面另掐了一个硬超时兜底；
+> 另外 TSDuck 只在「exe 自身目录」和当前目录找 `tsduck.dtv.names`，从别处调用会先甩
+> 一行 `Error: error opening file ...dtv.names` 吓人（其实不影响分析），脚本把
+> cwd 切到了 tsp 目录来消掉它。
+
+---
+
+## 9. 已知限制
 
 | # | 限制 | 影响 |
 |---|---|---|
@@ -246,7 +293,7 @@ ANDROID_NDK_HOME=/opt/ndk-r25c ./scripts/build-android.sh arm64
 
 ---
 
-## 9. 许可证
+## 10. 许可证
 
 本项目为 **GPL v2**。产物包含 GPL v2 的 `x264` / `x265` / `davs2` / `xavs2`，
 因此**产物整体按 GPL v2 分发**。打包时会自动附带 FFmpeg 源码树里的
