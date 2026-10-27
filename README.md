@@ -137,15 +137,31 @@ bionic 不能静态链（会丢 TLS/atfork，运行时随机崩，官方不支�
   `com_seqh_t` 补了同名同序的四个字段（不升 1.2，避免其 CMakeLists 的 armv7 分支
   强制 `-mfloat-abi=hard` 打坏 Android softfp 构建）。
 
-实测效果（深圳卫视 4K 组播，AVS2 Main10）：
+实测效果（深圳卫视 4K 组播，AVS2 Main10，3840x2160 yuv420p10le）：
 
 ```
-$ ffprobe -show_streams udp://230.177.0.28:3028?...
-color_primaries=bt2020  color_transfer=arib-std-b67  color_space=bt2020nc
+$ ffprobe -show_streams 录制.ts
+
+v6.1.6-avs.1（改动前）        v6.1.6-avs.2（改动后）
+color_primaries=unknown  ->  color_primaries=bt2020
+color_transfer =unknown  ->  color_transfer =arib-std-b67
+color_space    =unknown  ->  color_space    =bt2020nc
 ```
 
 即 **BT.2020 + HLG**。改动前这三个值全是 `unknown`，播放器只能按 BT.709/SDR 解释，
 画面会偏淡偏灰。
+
+反向对照（说明补丁**不会凭空造色彩**）：用本仓库的 `xavs2` 自编一个 AVS2 流，它不带
+序列显示扩展，`ffprobe` 报的仍然是三个 `unknown` —— 只有码流里真的有
+`colour_description=1` 才写值。
+
+`color_range` 仍是 `unknown`：序列显示扩展里还有一位 `sample_range`，实测这条流是
+`0`（limited），而 FFmpeg 对 `yuv420p10le` 默认也按 limited 处理，所以没有映射它 ——
+映射错了反而会让画面偏色，宁可不做。
+
+**AVS3 侧的色彩没有真实样本可验。** `uavs3d` 那条链路补的是 `com_seqh_t` 的字段搬运，
+代码路径与 FFmpeg 自带的 AVS3 解码器一致（映射表逐项照抄 `libavcodec/avs3.h`），
+但手上没有 AVS3 广播流，只能用「AVS3 编解码往返仍然正常」证明没有打断原有功能。
 
 **编码侧仍不写色彩。** `xavs2` 的序列显示扩展字段在上游是注释掉的，本仓库没有补，
 所以自编的 AVS2 流仍不带 colour_description。解码侧不受影响。
@@ -290,6 +306,8 @@ PATH、`$TSDuck_HOME`、常见安装目录，也可以用 `--tsp` 指定。
 | 4 | x265 只有 8bit | 10bit HEVC 编码不可用 |
 | 5 | xavs2 只有 8bit | AVS2 10bit 编码不可用（上游限制） |
 | 6 | aom 官方源在国内常不可达 | 可选库，默认关闭，不影响 AVS |
+| 7 | AVS3 色彩透出没有真实广播流可验 | 代码路径与 FFmpeg 自带 AVS3 解码器一致，只验证了「不破坏原有编解码」 |
+| 8 | `color_range` 不映射 `sample_range` | 实测流该位为 0（limited），FFmpeg 默认也按 limited 处理，硬映射反而可能偏色 |
 
 ---
 
