@@ -312,6 +312,168 @@ build_sdl2() {
 }
 
 # ------------------------------------------------------------------------------
+# 硬件编解码头文件 / 库（Windows 专属）
+#
+# 这三个曾经只在 env.sh 的 DEPS 里登记，**没有对应的 build 函数**，
+# 于是从来没有被安装过；build-ffmpeg.sh 里的 _have_pc 探测必然失败，
+# 一路 WARN 跳过，构建照样全绿 —— 结果是产物里 nvenc / qsv / amf 一个都没有。
+# 属于安静型故障：CI 不红，但功能缺失。（9.0.2 仓库同期发现同一个问题，一并修了。）
+#
+# 分工要分清：
+#   nvcodec (ffnvcodec)  只有头文件，没有 .a。它给 nvenc/nvdec/cuvid 提供 ABI 声明，
+#                        真正的实现在 NVIDIA 驱动里，运行时动态加载 ⇒ 静态链接照样能用。
+#   libvpl               Intel oneVPL，有静态库 + .pc（注意 .pc 名是 vpl，不是 libvpl）。
+#   amf                  AMD，无 .pc、无库，只装头文件目录 AMF/。
+# ------------------------------------------------------------------------------
+build_nvcodec() {
+  dep_needed nvcodec || return 0
+  local dir; dir="$(fetch nvcodec)"
+  local logf="$LOGS/nvcodec.log"
+  CURRENT_LOGFILE="$logf"
+
+  # 它没有任何编译单元，install 只是拷头文件 + 由 ffnvcodec.pc.in 生成 .pc。
+  # 用 PREFIX 而不是 DESTDIR 覆盖：Makefile 里是 `PREFIX ?= /usr/local`。
+  make -C "$dir" install "PREFIX=$PREFIX" > "$logf" 2>&1 \
+    || { dump_log "$logf"; die "nvcodec: make install 失败"; }
+
+  require_pc ffnvcodec
+}
+
+build_libvpl() {
+  dep_needed libvpl || return 0
+  local dir; dir="$(fetch libvpl)"
+
+  # Windows/MinGW：libvpl 的 mfx_dispatcher_defs.h 写了
+  #     #if _MSC_VER < 1400
+  #         #define wcscpy_s(to,to_size,from) \
+  #             (void)(to_size); \
+  #             wcscpy(to, from)
+  #     #endif
+  # MinGW 不定义 _MSC_VER，预处理器按 0 处理 ⇒ 0 < 1400 成立 ⇒ 走进这个分支。
+  # 而这个多行宏本身是坏的：调用处是 `return 0 == wcscpy_s(...)`，
+  # 展开后变成 `return 0 == (void)(n); wcscpy(...);`，语法直接崩：
+  #     error: expected ')' before ';' token
+  # 上游 2.13 / 2.14 / 2.15 都没修，升级版本没用，只能本地改。
+  # 改法：让 MinGW 不进那个分支（它本来就不该进 —— MinGW 没有 wcscpy_s），
+  # 另给一个语义等价的 inline 实现（返回 errno_t，0 = 成功，与调用处的
+  # `return 0 == wcscpy_s(...)` 判据一致）。
+  if [ "${TARGET_OS:-}" = "windows" ]; then
+    local defs="$dir/libvpl/src/windows/mfx_dispatcher_defs.h"
+    [ -f "$defs" ] || die "libvpl: 找不到 libvpl/src/windows/mfx_dispatcher_defs.h"
+
+    # 用 heredoc 存新旧两段，避免 C 源码里的单引号与 bash 的 '...' 打架
+    local vpl_old vpl_new
+    vpl_old=$(cat <<'VPLOLD'
+#if _MSC_VER < 1400
+    #define wcscpy_s(to, to_size, from) \
+        (void)(to_size);                \
+        wcscpy(to, from)
+    #define wcscat_s(to, to_size, from) \
+        (void)(to_size);                \
+        wcscat(to, from)
+#endif
+VPLOLD
+)
+    vpl_new=$(cat <<'VPLNEW'
+#if !defined(__MINGW32__) && _MSC_VER < 1400
+    #define wcscpy_s(to, to_size, from) \
+        (void)(to_size);                \
+        wcscpy(to, from)
+    #define wcscat_s(to, to_size, from) \
+        (void)(to_size);                \
+        wcscat(to, from)
+#endif
+
+/* MinGW 没有 wcscpy_s / wcscat_s（MSVC CRT 专有），但调用处会检查返回值：
+ *     return 0 == wcscpy_s(pPath, pathSize, name) ? MFX_ERR_NONE : ...
+ * 所以给语义一致的实现：成功返回 0，超长返回 ERANGE 并截断置零。 */
+#if defined(__MINGW32__)
+#include <cerrno>
+#include <cwchar>
+static inline errno_t vpl_wcscpy_s(wchar_t *dst, size_t dstsz, const wchar_t *src)
+{
+    if (!dst || dstsz == 0) return EINVAL;
+    size_t i = 0;
+    for (; src && src[i] && i + 1 < dstsz; i++) dst[i] = src[i];
+    bool truncated = (src && src[i] != 0);
+    dst[i] = 0;
+    return truncated ? ERANGE : 0;
+}
+static inline errno_t vpl_wcscat_s(wchar_t *dst, size_t dstsz, const wchar_t *src)
+{
+    if (!dst || dstsz == 0) return EINVAL;
+    size_t i = 0;
+    while (i < dstsz && dst[i]) i++;
+    if (i >= dstsz) return EINVAL;
+    return vpl_wcscpy_s(dst + i, dstsz - i, src);
+}
+#define wcscpy_s vpl_wcscpy_s
+#define wcscat_s vpl_wcscat_s
+#endif
+VPLNEW
+)
+    edit_exact "$defs" "$vpl_old" "$vpl_new"
+  fi
+
+  # 只要 dispatcher 那个静态库，不要 examples / tools / 测试
+  cmake_build "$dir" libvpl \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    -DBUILD_EXAMPLES=OFF \
+    -DBUILD_TOOLS=OFF \
+    -DBUILD_TESTS=OFF
+
+  # 注意 pkg-config 名是 **vpl** 而不是 libvpl —— 上游 libvpl/pkgconfig/vpl.pc.in
+  # 生成的产物就叫 vpl.pc。这也正好对上 configure 里那句：
+  #   check_pkg_config libmfx "vpl >= 2.6" "mfxvideo.h mfxdispatcher.h" MFXLoad
+  require_pc vpl
+}
+
+build_amf() {
+  dep_needed amf || return 0
+  local dir; dir="$(fetch amf)"
+
+  # AMF 只有头文件，没有 .pc。FFmpeg configure 的检测写死了
+  #   check_cpp_condition amf "AMF/core/Version.h" ...
+  # 所以必须装到 $PREFIX/include/AMF/ 这一层，不能多一层也不能少一层。
+  [ -d "$dir/amf/public/include" ] \
+    || die "amf: 找不到 amf/public/include（上游目录结构变了）"
+
+  mkdir -p "$PREFIX/include"
+  cp -rf "$dir/amf/public/include" "$PREFIX/include/AMF"
+
+  # 版本门槛：注意 6.1.6 和 9.0 要求不同！
+  #   6.1.6: >= 0x00010004001d0000   即 MINOR>=4 且 RELEASE>=0x1d(29)
+  #   9.0   : >= 0x1000500020000     即 MINOR>=5
+  # 我们在 env.sh 里锁的是 1.4.33，算出 0x1000400210000，**满足 6.1.6**（不用升级），
+  # 但**不满足 9.0**（那边已升到 1.5.2）。两个仓库的版本号因此不同，这是故意的。
+  # 不达标时 configure 会静默 disable amf，然后报一句毫不相干的
+  #   ERROR: amf requested but not found
+  # 在这里先算一遍，把问题挡在依赖阶段。
+  local vh="$PREFIX/include/AMF/core/Version.h"
+  [ -f "$vh" ] || die "amf: 找不到 AMF/core/Version.h"
+  local maj min rel bld got
+  maj=$(sed -n 's/^#define AMF_VERSION_MAJOR[[:space:]]*\([0-9]*\).*/\1/p' "$vh" | head -1)
+  min=$(sed -n 's/^#define AMF_VERSION_MINOR[[:space:]]*\([0-9]*\).*/\1/p' "$vh" | head -1)
+  rel=$(sed -n 's/^#define AMF_VERSION_RELEASE[[:space:]]*\([0-9]*\).*/\1/p' "$vh" | head -1)
+  bld=$(sed -n 's/^#define AMF_VERSION_BUILD_NUM[[:space:]]*\([0-9]*\).*/\1/p' "$vh" | head -1)
+  # 门槛跟着 FFMPEG_VERSION 走：6.x 用 0x10004001d0000，9.x 用 0x1000500020000
+  local need
+  case "${FFMPEG_VERSION:-}" in
+    6.*) need=0x10004001d0000 ;;
+    *)   need=0x1000500020000 ;;
+  esac
+  got=$(python3 -c "print('%x' % ((${maj:-0}<<48)|(${min:-0}<<32)|(${rel:-0}<<16)|(${bld:-0})))")
+  if ! python3 -c "
+import sys
+got = (${maj:-0}<<48)|(${min:-0}<<32)|(${rel:-0}<<16)|(${bld:-0})
+sys.exit(0 if got >= $need else 1)
+"; then
+    die "amf $maj.$min.$rel 太旧（0x$got < $need），FFmpeg 会静默禁用 amf。请升级 AMF。"
+  fi
+  ok "安装 include/AMF $maj.$min.$rel（版本满足 FFmpeg $FFMPEG_VERSION 要求 0x$got）"
+}
+
+# ------------------------------------------------------------------------------
 build_misc_all() {
   build_zlib
   build_openssl
@@ -324,4 +486,8 @@ build_misc_all() {
   build_zimg
   build_srt
   build_sdl2
+  # 硬件编解码（Windows 专属，dep_needed 内部按 TARGET_OS 过滤）
+  build_nvcodec
+  build_libvpl
+  build_amf
 }

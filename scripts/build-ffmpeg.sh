@@ -213,22 +213,33 @@ build_ffmpeg() {
 
   # ---------------- 平台专属 ----------------
   if [ "${TARGET_OS:-}" = "windows" ]; then
-    # 硬件编码只装头文件，无运行库依赖；没装到就自动跳过。
+    # 硬件编解码是 windows 产物的交付项之一，缺任何一个都算构建不合格 —— 用 die 而不是 warn。
+    #
+    # 这条规则的由来：nvcodec/amf/libvpl 曾在 DEPS 里登记却没有 build 函数，
+    # 检测失败只打一行 WARN，构建照样全绿，产物里 nvenc/qsv/amf 数量为 0，
+    # 直到人工拿 ffmpeg -encoders 去数才发现。安静型故障比失败更难查。
+    #
     # 注意不要写 --enable-ffnvcodec：那不是文档化的开关，
     # nvenc 的依赖里已经含 ffnvcodec，会自动带上。
-    # 注意不能写 `_enable_if_pc ... && FF_ARGS+=(...)`：_enable_if_pc 现在恒返回 0，
-    # 那样 --enable-nvdec 会被无条件加上。用 _have_pc 显式判断。
     if _have_pc ffnvcodec; then
       FF_ARGS+=(--enable-nvenc --enable-nvdec)
     else
-      warn "跳过 --enable-nvenc（pkg-config 找不到 ffnvcodec）"
+      die "--enable-nvenc 需要 ffnvcodec，但 pkg-config 找不到它（build_nvcodec 没跑成？）"
     fi
-    _enable_if_pc libvpl --enable-libvpl
-    # AMF 没有 .pc，只能看头文件
+
+    # pkg-config 名是 vpl（上游产物 vpl.pc），不是 libvpl —— 与 configure 里
+    # check_pkg_config libmfx "vpl >= 2.6" 一致。
+    if _have_pc vpl; then
+      FF_ARGS+=(--enable-libvpl)
+    else
+      die "--enable-libvpl 需要 vpl.pc（>= 2.6），但 pkg-config 找不到它（build_libvpl 没跑成？）"
+    fi
+
+    # AMF 没有 .pc，只能看头文件（configure 检查的是 AMF/core/Version.h）
     if [ -d "$PREFIX/include/AMF" ]; then
       FF_ARGS+=(--enable-amf)
     else
-      warn "跳过 --enable-amf（$PREFIX/include/AMF 不存在）"
+      die "--enable-amf 需要 $PREFIX/include/AMF，但目录不存在（build_amf 没跑成？）"
     fi
   fi
 
@@ -288,6 +299,25 @@ build_ffmpeg() {
   assert_config CONFIG_LIBUAVS3D_DECODER  "AVS3 解码 (libuavs3d)"
   assert_config CONFIG_LIBUAVS3E_ENCODER  "AVS3 编码 (libuavs3e)"
   assert_config CONFIG_LIBXAVS2_ENCODER   "AVS2 编码 (libxavs2)"
+
+  # 硬件编解码：windows 上同样是交付项。这两组曾经因为没有 build 函数而
+  # 静默缺失（构建全绿、产物里 0 个 nvenc/qsv/amf），所以在 configure 之后
+  # 再断言一次 CONFIG_xxx，把「参数加了但没真开成」也拦住。
+  if [ "${TARGET_OS:-}" = "windows" ]; then
+    # 键名按 configure 里的归属分别核对：
+    #   EXTERNAL_LIBRARY_LIST -> CONFIG_FFNVCODEC / CONFIG_LIBVPL / CONFIG_AMF
+    #   CONFIG_LIST           -> CONFIG_QSV / CONFIG_NVENC / CONFIG_NVDEC / CONFIG_CUVID
+    assert_config CONFIG_FFNVCODEC          "nv-codec-headers 头文件就位"
+    assert_config CONFIG_NVENC              "集成 NVIDIA NVENC"
+    assert_config CONFIG_NVDEC              "集成 NVIDIA NVDEC"
+    assert_config CONFIG_CUVID              "NVIDIA CUVID 解码"
+    assert_config CONFIG_H264_NVENC_ENCODER "h264_nvenc 编码器"
+    assert_config CONFIG_LIBVPL             "集成 Intel oneVPL"
+    assert_config CONFIG_QSV                "QSV 框架"
+    assert_config CONFIG_H264_QSV_ENCODER   "h264_qsv 编码器"
+    assert_config CONFIG_AMF                "集成 AMD AMF"
+    assert_config CONFIG_H264_AMF_ENCODER   "h264_amf 编码器"
+  fi
 
   if pkg-config --exists sdl2 2>/dev/null; then
     ok "SDL2 就位，ffplay 会一起编"
