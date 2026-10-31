@@ -1,4 +1,4 @@
-# ffmpeg-avs-bin
+# ffmpeg-avs-bin-6
 
 带 **AVS2 / AVS3 完整编解码能力** 的 FFmpeg 静态构建，Windows / Linux / Android 三平台。
 
